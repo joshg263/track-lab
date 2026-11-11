@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Track Lab - 3D Viewer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            overflow: hidden;
+        }
+        #canvas-container {
+            width: 100vw;
+            height: 100vh;
+        }
+        #controls {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 15px;
+            border-radius: 8px;
+            font-size: 13px;
+            max-width: 320px;
+            z-index: 100;
+        }
+        #controls h2 {
+            margin-bottom: 10px;
+            font-size: 16px;
+            color: #ff6b6b;
+        }
+        #controls label {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin: 8px 0;
+        }
+        #controls input[type="range"] {
+            flex: 1;
+            accent-color: #ff6b6b;
+        }
+        #controls input[type="checkbox"] {
+            accent-color: #ff6b6b;
+        }
+        #stats {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 15px;
+            border-radius: 8px;
+            font-size: 13px;
+            max-width: 280px;
+            z-index: 100;
+        }
+        #stats h2 {
+            margin-bottom: 10px;
+            font-size: 16px;
+            color: #4ecdc4;
+        }
+        #stats table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        #stats td {
+            padding: 3px 0;
+        }
+        #stats td:first-child {
+            color: #888;
+        }
+        #stats td:last-child {
+            text-align: right;
+            font-family: monospace;
+        }
+        #corners {
+            margin-top: 15px;
+            border-top: 1px solid #333;
+            padding-top: 10px;
+        }
+        #corners h3 {
+            font-size: 13px;
+            color: #f9ca24;
+            margin-bottom: 8px;
+        }
+        #corners ul {
+            list-style: none;
+            font-family: monospace;
+            font-size: 11px;
+            max-height: 150px;
+            overflow-y: auto;
+        }
+        #corners li {
+            padding: 2px 0;
+        }
+        #loading {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 20px;
+            z-index: 1000;
+        }
+        .help {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.6);
+            padding: 10px 15px;
+            border-radius: 8px;
+            font-size: 12px;
+            color: #888;
+        }
+    </style>
+</head>
+<body>
+    <div id="loading">Loading terrain data...</div>
+    <div id="canvas-container"></div>
+    
+    <div id="controls">
+        <h2>🏎️ Red Bull Ring</h2>
+        <label>
+            Vertical Exaggeration
+            <input type="range" id="exaggeration" min="1" max="10" step="0.5" value="3">
+            <span id="exag-value">3×</span>
+        </label>
+        <label>
+            <input type="checkbox" id="show-terrain" checked>
+            Show Terrain
+        </label>
+        <label>
+            <input type="checkbox" id="show-track" checked>
+            Show Track
+        </label>
+        <label>
+            <input type="checkbox" id="track-tubes" checked>
+            Track as Tube
+        </label>
+        <label>
+            <input type="checkbox" id="show-corners" checked>
+            Show Corner Markers
+        </label>
+    </div>
+    
+    <div id="stats">
+        <h2>Track Statistics</h2>
+        <table id="stats-table">
+            <tr><td>Length</td><td id="stat-length">-</td></tr>
+            <tr><td>Min Elevation</td><td id="stat-min-elev">-</td></tr>
+            <tr><td>Max Elevation</td><td id="stat-max-elev">-</td></tr>
+            <tr><td>Elevation Range</td><td id="stat-elev-range">-</td></tr>
+            <tr><td>Total Climb</td><td id="stat-total-change">-</td></tr>
+            <tr><td>Max Uphill</td><td id="stat-max-up">-</td></tr>
+            <tr><td>Max Downhill</td><td id="stat-max-down">-</td></tr>
+        </table>
+        <div id="corners">
+            <h3>Tightest Corners</h3>
+            <ul id="corners-list"></ul>
+        </div>
+    </div>
+    
+    <div class="help">
+        Drag to orbit • Scroll to zoom • Right-drag to pan
+    </div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.162.0/examples/jsm/"
+        }
+    }
+    </script>
+    
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        let scene, camera, renderer, controls;
+        let terrainMesh, trackLine, trackTube, cornerMarkers = [];
+        let terrainData, trackData;
+        let baseElevation = 0;
+
+        async function init() {
+            // Load data
+            try {
+                const [terrainRes, trackRes] = await Promise.all([
+                    fetch('data/terrain.json'),
+                    fetch('data/track.json')
+                ]);
+                terrainData = await terrainRes.json();
+                trackData = await trackRes.json();
+            } catch (e) {
+                document.getElementById('loading').textContent = 
+                    'Error loading data. Run: make viewer-data';
+                console.error(e);
+                return;
+            }
+
+            document.getElementById('loading').style.display = 'none';
+            
+            // Setup scene
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x1a1a2e);
+            
+            // Camera
+            const container = document.getElementById('canvas-container');
+            camera = new THREE.PerspectiveCamera(
+                60, container.clientWidth / container.clientHeight, 1, 50000
+            );
+            camera.position.set(2000, 2000, 2000);
+            
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(container.clientWidth, container.clientHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            container.appendChild(renderer.domElement);
+            
+            // Controls
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.maxDistance = 10000;
+            controls.minDistance = 100;
+            
+            // Lighting
+            const ambient = new THREE.AmbientLight(0xffffff, 0.4);
+            scene.add(ambient);
+            
+            const sun = new THREE.DirectionalLight(0xffffff, 0.8);
+            sun.position.set(1000, 2000, 500);
+            scene.add(sun);
+            
+            // Build meshes
+            baseElevation = (terrainData.grid.min_elev + terrainData.grid.max_elev) / 2;
+            buildTerrain();
+            buildTrack();
+            buildCornerMarkers();
+            updateStats();
+            
+            // Controls listeners
+            setupControls();
+            
+            // Handle resize
+            window.addEventListener('resize', onResize);
+            
+            // Start render loop
+            animate();
+        }
+
+        function buildTerrain() {
+            const { rows, cols } = terrainData.grid;
+            const { width, height } = terrainData.size_m;
+            const heights = terrainData.heights;
+            const exag = parseFloat(document.getElementById('exaggeration').value);
+            
+            const geometry = new THREE.PlaneGeometry(width, height, cols - 1, rows - 1);
+            const positions = geometry.attributes.position.array;
+            
+            for (let i = 0; i < rows; i++) {
+                for (let j = 0; j < cols; j++) {
+                    const idx = i * cols + j;
+                    const vertIdx = idx * 3;
+                    const elev = heights[rows - 1 - i][j]; // flip Y
+                    positions[vertIdx + 2] = (elev - baseElevation) * exag;
+                }
+            }
+            
+            geometry.computeVertexNormals();
+            
+            // Color by elevation
+            const colors = new Float32Array(rows * cols * 3);
+            const minE = terrainData.grid.min_elev;
+            const maxE = terrainData.grid.max_elev;
+            const range = maxE - minE || 1;
+            
+            for (let i = 0; i < rows; i++) {
+                for (let j = 0; j < cols; j++) {
+                    const idx = i * cols + j;
+                    const elev = heights[rows - 1 - i][j];
+                    const t = (elev - minE) / range;
+                    
+                    // Green to brown gradient
+                    const color = new THREE.Color();
+                    color.setHSL(0.25 - t * 0.15, 0.5, 0.3 + t * 0.2);
+                    colors[idx * 3] = color.r;
+                    colors[idx * 3 + 1] = color.g;
+                    colors[idx * 3 + 2] = color.b;
+                }
+            }
+            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            
+            const material = new THREE.MeshLambertMaterial({
+                vertexColors: true,
+                side: THREE.DoubleSide
+            });
+            
+            if (terrainMesh) scene.remove(terrainMesh);
+            terrainMesh = new THREE.Mesh(geometry, material);
+            terrainMesh.rotation.x = -Math.PI / 2;
+            scene.add(terrainMesh);
+        }
+
+        function buildTrack() {
+            const points = trackData.points;
+            const exag = parseFloat(document.getElementById('exaggeration').value);
+            const useTube = document.getElementById('track-tubes').checked;
+            
+            // Create path
+            const pathPoints = points.map(p => 
+                new THREE.Vector3(p.x, (p.z - baseElevation) * exag + 5, -p.y)
+            );
+            
+            // Close the loop
+            pathPoints.push(pathPoints[0].clone());
+            
+            // Remove old
+            if (trackLine) scene.remove(trackLine);
+            if (trackTube) scene.remove(trackTube);
+            
+            if (useTube) {
+                const curve = new THREE.CatmullRomCurve3(pathPoints, true);
+                const tubeGeo = new THREE.TubeGeometry(curve, points.length * 2, 8, 8, true);
+                const tubeMat = new THREE.MeshPhongMaterial({ 
+                    color: 0xff4444,
+                    shininess: 50
+                });
+                trackTube = new THREE.Mesh(tubeGeo, tubeMat);
+                scene.add(trackTube);
+            } else {
+                const lineGeo = new THREE.BufferGeometry().setFromPoints(pathPoints);
+                const lineMat = new THREE.LineBasicMaterial({ 
+                    color: 0xff4444, 
+                    linewidth: 3 
+                });
+                trackLine = new THREE.Line(lineGeo, lineMat);
+                scene.add(trackLine);
+            }
+        }
+
+        function buildCornerMarkers() {
+            // Clear old markers
+            cornerMarkers.forEach(m => scene.remove(m));
+            cornerMarkers = [];
+            
+            const exag = parseFloat(document.getElementById('exaggeration').value);
+            const corners = trackData.corners;
+            const points = trackData.points;
+            
+            corners.forEach((corner, idx) => {
+                // Find closest point
+                let closest = points[0];
+                let minDist = Math.abs(points[0].distance - corner.position_m);
+                for (const p of points) {
+                    const d = Math.abs(p.distance - corner.position_m);
+                    if (d < minDist) {
+                        minDist = d;
+                        closest = p;
+                    }
+                }
+                
+                // Create marker
+                const geo = new THREE.SphereGeometry(12, 16, 16);
+                const mat = new THREE.MeshPhongMaterial({ 
+                    color: idx < 3 ? 0xf9ca24 : 0x4ecdc4 
+                });
+                const marker = new THREE.Mesh(geo, mat);
+                marker.position.set(
+                    closest.x, 
+                    (closest.z - baseElevation) * exag + 20, 
+                    -closest.y
+                );
+                cornerMarkers.push(marker);
+                scene.add(marker);
+            });
+        }
+
+        function updateStats() {
+            const stats = trackData.stats;
+            document.getElementById('stat-length').textContent = 
+                `${(stats.length_m / 1000).toFixed(3)} km`;
+            document.getElementById('stat-min-elev').textContent = 
+                `${stats.min_elevation_m.toFixed(1)} m`;
+            document.getElementById('stat-max-elev').textContent = 
+                `${stats.max_elevation_m.toFixed(1)} m`;
+            document.getElementById('stat-elev-range').textContent = 
+                `${stats.elevation_range_m.toFixed(1)} m`;
+            document.getElementById('stat-total-change').textContent = 
+                `${stats.total_elevation_change_m.toFixed(1)} m`;
+            document.getElementById('stat-max-up').textContent = 
+                `+${stats.max_uphill_pct.toFixed(1)}%`;
+            document.getElementById('stat-max-down').textContent = 
+                `${stats.max_downhill_pct.toFixed(1)}%`;
+            
+            const list = document.getElementById('corners-list');
+            list.innerHTML = trackData.corners.slice(0, 10).map((c, i) => 
+                `<li>#${i+1}: R=${c.radius_m.toFixed(0)}m @ ${c.position_m.toFixed(0)}m</li>`
+            ).join('');
+        }
+
+        function setupControls() {
+            const exagSlider = document.getElementById('exaggeration');
+            const exagValue = document.getElementById('exag-value');
+            
+            exagSlider.addEventListener('input', () => {
+                exagValue.textContent = exagSlider.value + '×';
+                buildTerrain();
+                buildTrack();
+                buildCornerMarkers();
+            });
+            
+            document.getElementById('show-terrain').addEventListener('change', (e) => {
+                if (terrainMesh) terrainMesh.visible = e.target.checked;
+            });
+            
+            document.getElementById('show-track').addEventListener('change', (e) => {
+                if (trackLine) trackLine.visible = e.target.checked;
+                if (trackTube) trackTube.visible = e.target.checked;
+            });
+            
+            document.getElementById('track-tubes').addEventListener('change', () => {
+                buildTrack();
+            });
+            
+            document.getElementById('show-corners').addEventListener('change', (e) => {
+                cornerMarkers.forEach(m => m.visible = e.target.checked);
+            });
+        }
+
+        function onResize() {
+            const container = document.getElementById('canvas-container');
+            camera.aspect = container.clientWidth / container.clientHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(container.clientWidth, container.clientHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        init();
+    </script>
+</body>
+</html>
