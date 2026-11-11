@@ -6,6 +6,7 @@ Runs offline-safe checks using a committed DEM fixture:
 1. GeoJSON structure validity
 2. Real analysis pipeline on fixture DEM
 3. Calibration against published Red Bull Ring figures
+4. Viewshed calculation tests (Spike 2)
 
 The fixture DEM (data/fixtures/red_bull_ring_dem.tif) is a cropped region
 of the full Copernicus tile, small enough to commit (~30KB).
@@ -19,6 +20,12 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_DIR = SCRIPT_DIR.parent
+
+sys.path.insert(0, str(SCRIPT_DIR))
+from compute_viewshed import (
+    PRESET_SEATS, POOR_VISIBILITY_SEAT, compute_viewshed, 
+    check_start_finish_visible, find_visible_corners
+)
 
 # Official figures from FIA Media Kit for 2026 Austrian Grand Prix
 # Source: https://www.fia.com/sites/default/files/media_kit_-_2026_austrian_grand_prix.pdf
@@ -204,6 +211,128 @@ def test_viewer_data():
     return True
 
 
+def test_viewshed(fixture_dem: Path, analysis: dict) -> bool:
+    """
+    Test viewshed calculations (Spike 2 verification).
+    
+    Checks:
+    a. Main grandstand sees the start/finish straight
+    b. Main grandstand scores higher than a poor position (NE corner)
+    c. Position behind high ground sees less
+    d. Results are deterministic on repeated runs
+    """
+    centreline_path = PROJECT_DIR / "data" / "centrelines" / "red_bull_ring.geojson"
+    
+    with open(centreline_path) as f:
+        gj = json.load(f)
+    coords = gj["features"][0]["geometry"]["coordinates"]
+    corners = analysis.get("corners", [])
+    
+    all_ok = True
+    
+    # Get main grandstand info
+    main_gs = PRESET_SEATS["main_grandstand"]
+    
+    # Test a: Main grandstand sees the start/finish straight
+    print("  Computing viewshed for main grandstand...")
+    main_result = compute_viewshed(
+        str(fixture_dem), coords, 
+        main_gs["lon"], main_gs["lat"],
+        main_gs["eye_height_m"]
+    )
+    main_visibility_pct = main_result["visible_pct"]
+    
+    sf_visible = check_start_finish_visible(
+        main_result["visibility"], 
+        main_result["distances_m"],
+        main_result["total_length_m"]
+    )
+    
+    status = "✓" if sf_visible else "✗"
+    print(f"{status} Main grandstand sees start/finish: {'Yes' if sf_visible else 'No'}")
+    if not sf_visible:
+        all_ok = False
+    
+    # Test b: Main grandstand scores higher than a poor position
+    # Use NE corner (47.228, 14.770) which has very poor visibility
+    poor_lon, poor_lat = 14.770, 47.228
+    
+    print("  Computing viewshed for poor position (NE corner)...")
+    poor_result = compute_viewshed(
+        str(fixture_dem), coords,
+        poor_lon, poor_lat, 10.0
+    )
+    poor_visibility_pct = poor_result["visible_pct"]
+    
+    # Main grandstand should have at least 20% more visibility than poor position
+    visibility_margin = main_visibility_pct - poor_visibility_pct
+    margin_ok = visibility_margin >= 20
+    
+    status = "✓" if margin_ok else "✗"
+    print(f"{status} Main grandstand visibility advantage:")
+    print(f"    Main grandstand: {main_visibility_pct:.1f}%")
+    print(f"    NE corner (poor): {poor_visibility_pct:.1f}%")
+    print(f"    Margin: {visibility_margin:.1f}% (required: ≥20%)")
+    if not margin_ok:
+        all_ok = False
+    
+    # Test c: Position behind high ground (north hills) sees less than main grandstand
+    north_lon, north_lat = 14.758, 47.230
+    
+    print("  Computing viewshed for position behind hills (north)...")
+    north_result = compute_viewshed(
+        str(fixture_dem), coords,
+        north_lon, north_lat, 10.0
+    )
+    north_visibility_pct = north_result["visible_pct"]
+    
+    # Main grandstand should have better visibility than north hills position
+    north_margin = main_visibility_pct - north_visibility_pct
+    north_ok = north_margin > 0
+    
+    status = "✓" if north_ok else "✗"
+    print(f"{status} Main grandstand better than north hills:")
+    print(f"    Main grandstand: {main_visibility_pct:.1f}%")
+    print(f"    North hills: {north_visibility_pct:.1f}%")
+    print(f"    Margin: {north_margin:.1f}%")
+    if not north_ok:
+        all_ok = False
+    
+    # Test d: Deterministic results
+    print("  Testing determinism (repeat computation)...")
+    main_result_2 = compute_viewshed(
+        str(fixture_dem), coords,
+        main_gs["lon"], main_gs["lat"],
+        main_gs["eye_height_m"]
+    )
+    
+    deterministic = (
+        main_result_2["visible_pct"] == main_result["visible_pct"] and
+        main_result_2["visibility"] == main_result["visibility"]
+    )
+    
+    status = "✓" if deterministic else "✗"
+    print(f"{status} Results deterministic: {'Yes' if deterministic else 'No'}")
+    if not deterministic:
+        print(f"    Run 1: {main_result['visible_pct']:.1f}%")
+        print(f"    Run 2: {main_result_2['visible_pct']:.1f}%")
+        all_ok = False
+    
+    # Report visible corners for main grandstand
+    if corners:
+        corners_vis = find_visible_corners(
+            main_result["visibility"],
+            main_result["distances_m"],
+            corners
+        )
+        visible_corners = [c for c in corners_vis if c["visible"]]
+        print(f"\n  Main grandstand sees {len(visible_corners)}/{len(corners)} corners:")
+        for c in visible_corners[:5]:
+            print(f"    R={c['radius_m']:.0f}m @ {c['position_m']:.0f}m")
+    
+    return all_ok
+
+
 def main():
     print("=" * 60)
     print("TRACK-LAB VERIFICATION")
@@ -235,13 +364,22 @@ def main():
     test_viewer_data()
     print()
     
+    print("6. Viewshed Calculation (Spike 2)")
+    print("-" * 40)
+    viewshed_ok = test_viewshed(fixture_dem, analysis)
+    print()
+    
     print("=" * 60)
-    if calibration_ok:
+    all_ok = calibration_ok and viewshed_ok
+    if all_ok:
         print("VERIFICATION PASSED")
         return 0
     else:
         print("VERIFICATION FAILED")
-        print("Computed values outside tolerance of official figures.")
+        if not calibration_ok:
+            print("  - Calibration values outside tolerance")
+        if not viewshed_ok:
+            print("  - Viewshed tests failed")
         return 1
 
 

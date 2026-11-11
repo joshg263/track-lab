@@ -4,16 +4,22 @@ Export terrain and track data for the 3D viewer.
 
 Creates:
 - terrain.json: Heightmap grid + metadata
-- track.json: Centreline with elevation profile
+- track.json: Centreline with elevation profile + viewshed presets
 """
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
 import rasterio
 from rasterio.windows import from_bounds
+
+sys.path.insert(0, str(Path(__file__).parent))
+from compute_viewshed import (
+    PRESET_SEATS, POOR_VISIBILITY_SEAT, compute_viewshed, find_visible_corners
+)
 
 
 def export_terrain(dem_paths: list, bbox: tuple, output_path: str, 
@@ -79,8 +85,8 @@ def export_terrain(dem_paths: list, bbox: tuple, output_path: str,
     return terrain
 
 
-def export_track(analysis_json: str, output_path: str) -> dict:
-    """Export track data for viewer."""
+def export_track(analysis_json: str, output_path: str, dem_path: str = None) -> dict:
+    """Export track data for viewer, including precomputed viewsheds."""
     with open(analysis_json) as f:
         analysis = json.load(f)
     
@@ -105,6 +111,8 @@ def export_track(analysis_json: str, output_path: str) -> dict:
             "x": round(x, 2),
             "y": round(y, 2),
             "z": round(z, 2),
+            "lon": round(lon, 6),
+            "lat": round(lat, 6),
             "distance": round(distances[i], 1),
             "gradient": round(gradients[i], 2),
             "curvature": round(curvature[i], 6)
@@ -123,13 +131,55 @@ def export_track(analysis_json: str, output_path: str) -> dict:
             "max_downhill_pct": analysis["max_downhill_gradient_pct"],
         },
         "corners": analysis["corners"],
-        "points": points_3d
+        "points": points_3d,
+        "preset_seats": [],
+        "track_width_m": 12.0
     }
+    
+    if dem_path:
+        print("\nComputing viewsheds for preset seats...")
+        corners = analysis.get("corners", [])
+        
+        for seat_id, seat_info in PRESET_SEATS.items():
+            try:
+                viewshed = compute_viewshed(
+                    dem_path, coords, 
+                    seat_info["lon"], seat_info["lat"],
+                    seat_info.get("eye_height_m", 10.0)
+                )
+                
+                corners_vis = find_visible_corners(
+                    viewshed["visibility"], viewshed["distances_m"], corners
+                )
+                
+                seat_x = (seat_info["lon"] - center_lon) * lon_scale
+                seat_y = (seat_info["lat"] - center_lat) * lat_scale
+                
+                preset = {
+                    "id": seat_id,
+                    "name": seat_info["name"],
+                    "description": seat_info.get("description", ""),
+                    "lon": seat_info["lon"],
+                    "lat": seat_info["lat"],
+                    "x": round(seat_x, 2),
+                    "y": round(seat_y, 2),
+                    "ground_elevation_m": viewshed["seat"]["ground_elevation_m"],
+                    "eye_height_m": seat_info.get("eye_height_m", 10.0),
+                    "eye_elevation_m": viewshed["seat"]["eye_elevation_m"],
+                    "visibility": viewshed["visibility"],
+                    "visible_pct": viewshed["visible_pct"],
+                    "visible_length_m": viewshed["visible_length_m"],
+                    "visible_corners": [c for c in corners_vis if c["visible"]]
+                }
+                track["preset_seats"].append(preset)
+                print(f"  {seat_info['name']}: {viewshed['visible_pct']:.1f}% visible")
+            except Exception as e:
+                print(f"  Warning: Could not compute viewshed for {seat_id}: {e}")
     
     with open(output_path, "w") as f:
         json.dump(track, f)
     
-    print(f"Track exported: {len(points_3d)} points")
+    print(f"\nTrack exported: {len(points_3d)} points")
     print(f"  File: {output_path} ({Path(output_path).stat().st_size / 1024:.1f} KB)")
     
     return track
@@ -166,7 +216,7 @@ def main():
     export_terrain(args.dem, bbox, str(output_dir / "terrain.json"), args.resolution)
     
     print("\nExporting track...")
-    export_track(args.analysis, str(output_dir / "track.json"))
+    export_track(args.analysis, str(output_dir / "track.json"), dem_path=args.dem[0])
 
 
 if __name__ == "__main__":

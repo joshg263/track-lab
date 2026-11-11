@@ -20,17 +20,27 @@
             position: fixed;
             top: 20px;
             left: 20px;
-            background: rgba(0, 0, 0, 0.8);
+            background: rgba(0, 0, 0, 0.85);
             padding: 15px;
             border-radius: 8px;
             font-size: 13px;
             max-width: 320px;
             z-index: 100;
+            max-height: calc(100vh - 40px);
+            overflow-y: auto;
         }
         #controls h2 {
             margin-bottom: 10px;
             font-size: 16px;
             color: #ff6b6b;
+        }
+        #controls h3 {
+            margin-top: 15px;
+            margin-bottom: 8px;
+            font-size: 14px;
+            color: #4ecdc4;
+            border-top: 1px solid #333;
+            padding-top: 10px;
         }
         #controls label {
             display: flex;
@@ -45,21 +55,59 @@
         #controls input[type="checkbox"] {
             accent-color: #ff6b6b;
         }
+        #controls select {
+            flex: 1;
+            background: #333;
+            color: #eee;
+            border: 1px solid #555;
+            padding: 5px;
+            border-radius: 4px;
+        }
+        #controls button {
+            background: #4ecdc4;
+            color: #1a1a2e;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 4px 2px;
+            font-size: 12px;
+        }
+        #controls button:hover {
+            background: #3dbdb5;
+        }
+        #controls button.secondary {
+            background: #555;
+            color: #eee;
+        }
+        #controls button.secondary:hover {
+            background: #666;
+        }
         #stats {
             position: fixed;
             top: 20px;
             right: 20px;
-            background: rgba(0, 0, 0, 0.8);
+            background: rgba(0, 0, 0, 0.85);
             padding: 15px;
             border-radius: 8px;
             font-size: 13px;
-            max-width: 280px;
+            max-width: 300px;
             z-index: 100;
+            max-height: calc(100vh - 40px);
+            overflow-y: auto;
         }
         #stats h2 {
             margin-bottom: 10px;
             font-size: 16px;
             color: #4ecdc4;
+        }
+        #stats h3 {
+            margin-top: 15px;
+            margin-bottom: 8px;
+            font-size: 14px;
+            color: #f9ca24;
+            border-top: 1px solid #333;
+            padding-top: 10px;
         }
         #stats table {
             width: 100%;
@@ -75,6 +123,13 @@
             text-align: right;
             font-family: monospace;
         }
+        .visible-stat {
+            color: #4ecdc4 !important;
+            font-weight: bold;
+        }
+        .hidden-stat {
+            color: #ff6b6b !important;
+        }
         #corners {
             margin-top: 15px;
             border-top: 1px solid #333;
@@ -84,6 +139,8 @@
             font-size: 13px;
             color: #f9ca24;
             margin-bottom: 8px;
+            border-top: none;
+            padding-top: 0;
         }
         #corners ul {
             list-style: none;
@@ -94,6 +151,12 @@
         }
         #corners li {
             padding: 2px 0;
+        }
+        #corners li.visible {
+            color: #4ecdc4;
+        }
+        #corners li.hidden {
+            color: #666;
         }
         #loading {
             position: fixed;
@@ -113,6 +176,36 @@
             font-size: 12px;
             color: #888;
         }
+        .seat-info {
+            background: rgba(78, 205, 196, 0.1);
+            border: 1px solid #4ecdc4;
+            border-radius: 4px;
+            padding: 8px;
+            margin: 8px 0;
+            font-size: 12px;
+        }
+        .seat-info .name {
+            font-weight: bold;
+            color: #4ecdc4;
+        }
+        .legend {
+            display: flex;
+            gap: 15px;
+            margin-top: 10px;
+            font-size: 11px;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        .legend-box {
+            width: 16px;
+            height: 10px;
+            border-radius: 2px;
+        }
+        .legend-visible { background: #4ecdc4; }
+        .legend-hidden { background: #ff6b6b; }
     </style>
 </head>
 <body>
@@ -123,8 +216,8 @@
         <h2>🏎️ Red Bull Ring</h2>
         <label>
             Vertical Exaggeration
-            <input type="range" id="exaggeration" min="1" max="10" step="0.5" value="3">
-            <span id="exag-value">3×</span>
+            <input type="range" id="exaggeration" min="1" max="10" step="0.5" value="2">
+            <span id="exag-value">2×</span>
         </label>
         <label>
             <input type="checkbox" id="show-terrain" checked>
@@ -132,16 +225,38 @@
         </label>
         <label>
             <input type="checkbox" id="show-track" checked>
-            Show Track
-        </label>
-        <label>
-            <input type="checkbox" id="track-tubes" checked>
-            Track as Tube
+            Show Track Ribbon
         </label>
         <label>
             <input type="checkbox" id="show-corners" checked>
             Show Corner Markers
         </label>
+        
+        <h3>👁️ Grandstand View</h3>
+        <label>
+            Seat
+            <select id="seat-select">
+                <option value="">Click terrain to place...</option>
+            </select>
+        </label>
+        <label>
+            Eye Height
+            <input type="range" id="eye-height" min="2" max="30" step="1" value="10">
+            <span id="eye-height-value">10m</span>
+        </label>
+        <div class="seat-info" id="seat-info" style="display: none;">
+            <div class="name" id="seat-name">-</div>
+            <div id="seat-coords">-</div>
+            <div id="seat-elevation">-</div>
+        </div>
+        <div>
+            <button id="btn-eye-view">📷 Eye View</button>
+            <button id="btn-orbit-view" class="secondary">🌐 Orbit View</button>
+        </div>
+        <div class="legend">
+            <div class="legend-item"><div class="legend-box legend-visible"></div> Visible</div>
+            <div class="legend-item"><div class="legend-box legend-hidden"></div> Hidden</div>
+        </div>
     </div>
     
     <div id="stats">
@@ -155,6 +270,14 @@
             <tr><td>Max Uphill</td><td id="stat-max-up">-</td></tr>
             <tr><td>Max Downhill</td><td id="stat-max-down">-</td></tr>
         </table>
+        
+        <h3>👁️ Visibility</h3>
+        <table>
+            <tr><td>Visible</td><td id="stat-visible-pct" class="visible-stat">-</td></tr>
+            <tr><td>Visible Length</td><td id="stat-visible-length">-</td></tr>
+            <tr><td>Hidden Length</td><td id="stat-hidden-length" class="hidden-stat">-</td></tr>
+        </table>
+        
         <div id="corners">
             <h3>Tightest Corners</h3>
             <ul id="corners-list"></ul>
@@ -162,7 +285,7 @@
     </div>
     
     <div class="help">
-        Drag to orbit • Scroll to zoom • Right-drag to pan
+        Drag to orbit • Scroll to zoom • Right-drag to pan • Click terrain to place seat
     </div>
 
     <script type="importmap">
@@ -179,12 +302,14 @@
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
         let scene, camera, renderer, controls;
-        let terrainMesh, trackLine, trackTube, cornerMarkers = [];
+        let terrainMesh, trackRibbon, cornerMarkers = [], seatMarker;
         let terrainData, trackData;
         let baseElevation = 0;
+        let currentSeat = null;
+        let currentVisibility = null;
+        let raycaster, mouse;
 
         async function init() {
-            // Load data
             try {
                 const [terrainRes, trackRes] = await Promise.all([
                     fetch('data/terrain.json'),
@@ -201,52 +326,51 @@
 
             document.getElementById('loading').style.display = 'none';
             
-            // Setup scene
             scene = new THREE.Scene();
             scene.background = new THREE.Color(0x1a1a2e);
             
-            // Camera
             const container = document.getElementById('canvas-container');
             camera = new THREE.PerspectiveCamera(
                 60, container.clientWidth / container.clientHeight, 1, 50000
             );
-            camera.position.set(2000, 2000, 2000);
+            camera.position.set(2000, 1500, 2000);
             
-            // Renderer
             renderer = new THREE.WebGLRenderer({ antialias: true });
             renderer.setSize(container.clientWidth, container.clientHeight);
             renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
             container.appendChild(renderer.domElement);
             
-            // Controls
             controls = new OrbitControls(camera, renderer.domElement);
             controls.enableDamping = true;
             controls.dampingFactor = 0.05;
             controls.maxDistance = 10000;
             controls.minDistance = 100;
             
-            // Lighting
-            const ambient = new THREE.AmbientLight(0xffffff, 0.4);
+            const ambient = new THREE.AmbientLight(0xffffff, 0.5);
             scene.add(ambient);
             
-            const sun = new THREE.DirectionalLight(0xffffff, 0.8);
+            const sun = new THREE.DirectionalLight(0xffffff, 0.7);
             sun.position.set(1000, 2000, 500);
             scene.add(sun);
             
-            // Build meshes
+            raycaster = new THREE.Raycaster();
+            mouse = new THREE.Vector2();
+            
             baseElevation = (terrainData.grid.min_elev + terrainData.grid.max_elev) / 2;
             buildTerrain();
-            buildTrack();
+            buildTrackRibbon();
             buildCornerMarkers();
+            populateSeatSelector();
             updateStats();
             
-            // Controls listeners
+            if (trackData.preset_seats && trackData.preset_seats.length > 0) {
+                selectSeat(trackData.preset_seats[0]);
+            }
+            
             setupControls();
-            
-            // Handle resize
             window.addEventListener('resize', onResize);
+            renderer.domElement.addEventListener('click', onCanvasClick);
             
-            // Start render loop
             animate();
         }
 
@@ -263,14 +387,13 @@
                 for (let j = 0; j < cols; j++) {
                     const idx = i * cols + j;
                     const vertIdx = idx * 3;
-                    const elev = heights[rows - 1 - i][j]; // flip Y
+                    const elev = heights[rows - 1 - i][j];
                     positions[vertIdx + 2] = (elev - baseElevation) * exag;
                 }
             }
             
             geometry.computeVertexNormals();
             
-            // Color by elevation
             const colors = new Float32Array(rows * cols * 3);
             const minE = terrainData.grid.min_elev;
             const maxE = terrainData.grid.max_elev;
@@ -282,7 +405,6 @@
                     const elev = heights[rows - 1 - i][j];
                     const t = (elev - minE) / range;
                     
-                    // Green to brown gradient
                     const color = new THREE.Color();
                     color.setHSL(0.25 - t * 0.15, 0.5, 0.3 + t * 0.2);
                     colors[idx * 3] = color.r;
@@ -303,45 +425,70 @@
             scene.add(terrainMesh);
         }
 
-        function buildTrack() {
+        function buildTrackRibbon() {
             const points = trackData.points;
             const exag = parseFloat(document.getElementById('exaggeration').value);
-            const useTube = document.getElementById('track-tubes').checked;
+            const trackWidth = trackData.track_width_m || 12;
+            const halfWidth = trackWidth / 2;
+            const zOffset = 1.5;
             
-            // Create path
-            const pathPoints = points.map(p => 
-                new THREE.Vector3(p.x, (p.z - baseElevation) * exag + 5, -p.y)
-            );
+            if (trackRibbon) scene.remove(trackRibbon);
             
-            // Close the loop
-            pathPoints.push(pathPoints[0].clone());
+            const vertices = [];
+            const colors = [];
+            const indices = [];
             
-            // Remove old
-            if (trackLine) scene.remove(trackLine);
-            if (trackTube) scene.remove(trackTube);
-            
-            if (useTube) {
-                const curve = new THREE.CatmullRomCurve3(pathPoints, true);
-                const tubeGeo = new THREE.TubeGeometry(curve, points.length * 2, 8, 8, true);
-                const tubeMat = new THREE.MeshPhongMaterial({ 
-                    color: 0xff4444,
-                    shininess: 50
-                });
-                trackTube = new THREE.Mesh(tubeGeo, tubeMat);
-                scene.add(trackTube);
-            } else {
-                const lineGeo = new THREE.BufferGeometry().setFromPoints(pathPoints);
-                const lineMat = new THREE.LineBasicMaterial({ 
-                    color: 0xff4444, 
-                    linewidth: 3 
-                });
-                trackLine = new THREE.Line(lineGeo, lineMat);
-                scene.add(trackLine);
+            for (let i = 0; i < points.length; i++) {
+                const p = points[i];
+                const pPrev = points[(i - 1 + points.length) % points.length];
+                const pNext = points[(i + 1) % points.length];
+                
+                const dx = pNext.x - pPrev.x;
+                const dy = pNext.y - pPrev.y;
+                const len = Math.sqrt(dx * dx + dy * dy) || 1;
+                
+                const nx = -dy / len;
+                const ny = dx / len;
+                
+                const z = (p.z - baseElevation) * exag + zOffset;
+                
+                vertices.push(
+                    p.x + nx * halfWidth, z, -(p.y + ny * halfWidth),
+                    p.x - nx * halfWidth, z, -(p.y - ny * halfWidth)
+                );
+                
+                const visible = currentVisibility ? currentVisibility[i] : true;
+                const color = visible ? new THREE.Color(0x4ecdc4) : new THREE.Color(0xff6b6b);
+                colors.push(color.r, color.g, color.b);
+                colors.push(color.r, color.g, color.b);
             }
+            
+            for (let i = 0; i < points.length; i++) {
+                const i0 = i * 2;
+                const i1 = i * 2 + 1;
+                const i2 = ((i + 1) % points.length) * 2;
+                const i3 = ((i + 1) % points.length) * 2 + 1;
+                
+                indices.push(i0, i2, i1);
+                indices.push(i1, i2, i3);
+            }
+            
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+            geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+            geometry.setIndex(indices);
+            geometry.computeVertexNormals();
+            
+            const material = new THREE.MeshLambertMaterial({
+                vertexColors: true,
+                side: THREE.DoubleSide
+            });
+            
+            trackRibbon = new THREE.Mesh(geometry, material);
+            scene.add(trackRibbon);
         }
 
         function buildCornerMarkers() {
-            // Clear old markers
             cornerMarkers.forEach(m => scene.remove(m));
             cornerMarkers = [];
             
@@ -350,7 +497,6 @@
             const points = trackData.points;
             
             corners.forEach((corner, idx) => {
-                // Find closest point
                 let closest = points[0];
                 let minDist = Math.abs(points[0].distance - corner.position_m);
                 for (const p of points) {
@@ -361,20 +507,133 @@
                     }
                 }
                 
-                // Create marker
-                const geo = new THREE.SphereGeometry(12, 16, 16);
+                const visible = isCornerVisible(corner);
+                const geo = new THREE.SphereGeometry(10, 16, 16);
                 const mat = new THREE.MeshPhongMaterial({ 
-                    color: idx < 3 ? 0xf9ca24 : 0x4ecdc4 
+                    color: visible ? 0x4ecdc4 : 0xff6b6b,
+                    opacity: visible ? 1.0 : 0.5,
+                    transparent: !visible
                 });
                 const marker = new THREE.Mesh(geo, mat);
                 marker.position.set(
                     closest.x, 
-                    (closest.z - baseElevation) * exag + 20, 
+                    (closest.z - baseElevation) * exag + 15, 
                     -closest.y
                 );
                 cornerMarkers.push(marker);
                 scene.add(marker);
             });
+        }
+
+        function isCornerVisible(corner) {
+            if (!currentVisibility || !currentSeat) return true;
+            
+            const points = trackData.points;
+            let closestIdx = 0;
+            let minDist = Math.abs(points[0].distance - corner.position_m);
+            for (let i = 0; i < points.length; i++) {
+                const d = Math.abs(points[i].distance - corner.position_m);
+                if (d < minDist) {
+                    minDist = d;
+                    closestIdx = i;
+                }
+            }
+            
+            const window = 5;
+            let visibleCount = 0;
+            let totalCount = 0;
+            for (let i = Math.max(0, closestIdx - window); i < Math.min(points.length, closestIdx + window + 1); i++) {
+                totalCount++;
+                if (currentVisibility[i]) visibleCount++;
+            }
+            
+            return visibleCount >= totalCount * 0.5;
+        }
+
+        function buildSeatMarker() {
+            if (!currentSeat) {
+                if (seatMarker) {
+                    scene.remove(seatMarker);
+                    seatMarker = null;
+                }
+                return;
+            }
+            
+            const exag = parseFloat(document.getElementById('exaggeration').value);
+            
+            if (seatMarker) scene.remove(seatMarker);
+            
+            const group = new THREE.Group();
+            
+            const baseGeo = new THREE.CylinderGeometry(8, 12, 4, 16);
+            const baseMat = new THREE.MeshPhongMaterial({ color: 0xf9ca24 });
+            const base = new THREE.Mesh(baseGeo, baseMat);
+            base.position.y = 2;
+            group.add(base);
+            
+            const poleGeo = new THREE.CylinderGeometry(2, 2, currentSeat.eye_height_m * exag, 8);
+            const poleMat = new THREE.MeshPhongMaterial({ color: 0xf9ca24 });
+            const pole = new THREE.Mesh(poleGeo, poleMat);
+            pole.position.y = currentSeat.eye_height_m * exag / 2 + 4;
+            group.add(pole);
+            
+            const eyeGeo = new THREE.SphereGeometry(6, 16, 16);
+            const eyeMat = new THREE.MeshPhongMaterial({ color: 0xffffff });
+            const eye = new THREE.Mesh(eyeGeo, eyeMat);
+            eye.position.y = currentSeat.eye_height_m * exag + 4;
+            group.add(eye);
+            
+            group.position.set(
+                currentSeat.x,
+                (currentSeat.ground_elevation_m - baseElevation) * exag,
+                -currentSeat.y
+            );
+            
+            seatMarker = group;
+            scene.add(seatMarker);
+        }
+
+        function populateSeatSelector() {
+            const select = document.getElementById('seat-select');
+            
+            select.innerHTML = '<option value="">Click terrain to place...</option>';
+            
+            if (trackData.preset_seats) {
+                trackData.preset_seats.forEach(seat => {
+                    const opt = document.createElement('option');
+                    opt.value = seat.id;
+                    opt.textContent = `${seat.name} (${seat.visible_pct.toFixed(0)}%)`;
+                    select.appendChild(opt);
+                });
+            }
+        }
+
+        function selectSeat(seat) {
+            currentSeat = seat;
+            currentVisibility = seat.visibility || null;
+            
+            const select = document.getElementById('seat-select');
+            if (seat.id) {
+                select.value = seat.id;
+            } else {
+                select.value = '';
+            }
+            
+            document.getElementById('eye-height').value = seat.eye_height_m;
+            document.getElementById('eye-height-value').textContent = seat.eye_height_m + 'm';
+            
+            const infoDiv = document.getElementById('seat-info');
+            infoDiv.style.display = 'block';
+            document.getElementById('seat-name').textContent = seat.name || 'Custom Position';
+            document.getElementById('seat-coords').textContent = 
+                `${seat.lat.toFixed(5)}°N, ${seat.lon.toFixed(5)}°E`;
+            document.getElementById('seat-elevation').textContent = 
+                `Ground: ${seat.ground_elevation_m.toFixed(0)}m, Eye: ${seat.eye_elevation_m.toFixed(0)}m`;
+            
+            buildTrackRibbon();
+            buildCornerMarkers();
+            buildSeatMarker();
+            updateVisibilityStats();
         }
 
         function updateStats() {
@@ -394,10 +653,201 @@
             document.getElementById('stat-max-down').textContent = 
                 `${stats.max_downhill_pct.toFixed(1)}%`;
             
+            updateCornersDisplay();
+        }
+
+        function updateVisibilityStats() {
+            if (!currentSeat || !currentVisibility) {
+                document.getElementById('stat-visible-pct').textContent = '-';
+                document.getElementById('stat-visible-length').textContent = '-';
+                document.getElementById('stat-hidden-length').textContent = '-';
+                return;
+            }
+            
+            document.getElementById('stat-visible-pct').textContent = 
+                `${currentSeat.visible_pct.toFixed(1)}%`;
+            document.getElementById('stat-visible-length').textContent = 
+                `${currentSeat.visible_length_m.toFixed(0)} m`;
+            
+            const hiddenLength = trackData.stats.length_m - currentSeat.visible_length_m;
+            document.getElementById('stat-hidden-length').textContent = 
+                `${hiddenLength.toFixed(0)} m`;
+            
+            updateCornersDisplay();
+        }
+
+        function updateCornersDisplay() {
             const list = document.getElementById('corners-list');
-            list.innerHTML = trackData.corners.slice(0, 10).map((c, i) => 
-                `<li>#${i+1}: R=${c.radius_m.toFixed(0)}m @ ${c.position_m.toFixed(0)}m</li>`
-            ).join('');
+            list.innerHTML = trackData.corners.slice(0, 10).map((c, i) => {
+                const visible = isCornerVisible(c);
+                const visClass = currentSeat ? (visible ? 'visible' : 'hidden') : '';
+                const visIcon = currentSeat ? (visible ? '👁️' : '🚫') : '';
+                return `<li class="${visClass}">${visIcon} #${i+1}: R=${c.radius_m.toFixed(0)}m @ ${c.position_m.toFixed(0)}m</li>`;
+            }).join('');
+        }
+
+        function sampleTerrainElevation(worldX, worldZ) {
+            const { rows, cols } = terrainData.grid;
+            const { width, height } = terrainData.size_m;
+            
+            const u = (worldX + width / 2) / width;
+            const v = (-worldZ + height / 2) / height;
+            
+            if (u < 0 || u > 1 || v < 0 || v > 1) return null;
+            
+            const col = u * (cols - 1);
+            const row = v * (rows - 1);
+            
+            const col0 = Math.floor(col);
+            const row0 = Math.floor(row);
+            const col1 = Math.min(col0 + 1, cols - 1);
+            const row1 = Math.min(row0 + 1, rows - 1);
+            
+            const dc = col - col0;
+            const dr = row - row0;
+            
+            const heights = terrainData.heights;
+            const e00 = heights[rows - 1 - row0][col0];
+            const e01 = heights[rows - 1 - row0][col1];
+            const e10 = heights[rows - 1 - row1][col0];
+            const e11 = heights[rows - 1 - row1][col1];
+            
+            return e00 * (1 - dc) * (1 - dr) +
+                   e01 * dc * (1 - dr) +
+                   e10 * (1 - dc) * dr +
+                   e11 * dc * dr;
+        }
+
+        function worldToLatLon(worldX, worldZ) {
+            const center = trackData.center;
+            const lat_scale = 111320;
+            const lon_scale = 111320 * Math.cos(center.lat * Math.PI / 180);
+            
+            const localY = -worldZ;
+            const localX = worldX;
+            
+            const lon = center.lon + localX / lon_scale;
+            const lat = center.lat + localY / lat_scale;
+            
+            return { lon, lat };
+        }
+
+        function checkLineOfSight(obsX, obsZ, obsElev, targetX, targetZ, targetElev, numSamples = 30) {
+            for (let i = 1; i < numSamples; i++) {
+                const t = i / numSamples;
+                
+                const sampleX = obsX + t * (targetX - obsX);
+                const sampleZ = obsZ + t * (targetZ - obsZ);
+                
+                const terrainElev = sampleTerrainElevation(sampleX, sampleZ);
+                if (terrainElev === null) continue;
+                
+                const losElev = obsElev + t * (targetElev - obsElev);
+                
+                if (terrainElev > losElev) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        function computeViewshedForPosition(seatX, seatY, groundElev, eyeHeight) {
+            const eyeElev = groundElev + eyeHeight;
+            const points = trackData.points;
+            const visibility = [];
+            
+            for (const p of points) {
+                const targetElev = p.z + 0.5;
+                const visible = checkLineOfSight(
+                    seatX, -seatY, eyeElev,
+                    p.x, -p.y, targetElev
+                );
+                visibility.push(visible);
+            }
+            
+            let visibleLength = 0;
+            let totalLength = 0;
+            for (let i = 0; i < points.length - 1; i++) {
+                const segLen = points[i + 1].distance - points[i].distance;
+                totalLength += segLen;
+                if (visibility[i] && visibility[i + 1]) {
+                    visibleLength += segLen;
+                }
+            }
+            
+            return {
+                visibility,
+                visible_length_m: visibleLength,
+                visible_pct: (visibleLength / totalLength) * 100
+            };
+        }
+
+        function onCanvasClick(event) {
+            const container = document.getElementById('canvas-container');
+            const rect = container.getBoundingClientRect();
+            
+            mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+            mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+            
+            raycaster.setFromCamera(mouse, camera);
+            
+            if (terrainMesh) {
+                const intersects = raycaster.intersectObject(terrainMesh);
+                if (intersects.length > 0) {
+                    const point = intersects[0].point;
+                    const exag = parseFloat(document.getElementById('exaggeration').value);
+                    const eyeHeight = parseFloat(document.getElementById('eye-height').value);
+                    
+                    const seatX = point.x;
+                    const seatY = -point.z;
+                    const groundElev = sampleTerrainElevation(seatX, point.z);
+                    
+                    if (groundElev === null) return;
+                    
+                    const latLon = worldToLatLon(seatX, point.z);
+                    
+                    const viewshed = computeViewshedForPosition(seatX, seatY, groundElev, eyeHeight);
+                    
+                    const customSeat = {
+                        id: null,
+                        name: 'Custom Position',
+                        lon: latLon.lon,
+                        lat: latLon.lat,
+                        x: seatX,
+                        y: seatY,
+                        ground_elevation_m: groundElev,
+                        eye_height_m: eyeHeight,
+                        eye_elevation_m: groundElev + eyeHeight,
+                        visibility: viewshed.visibility,
+                        visible_pct: viewshed.visible_pct,
+                        visible_length_m: viewshed.visible_length_m
+                    };
+                    
+                    selectSeat(customSeat);
+                }
+            }
+        }
+
+        function jumpToEyeView() {
+            if (!currentSeat) return;
+            
+            const exag = parseFloat(document.getElementById('exaggeration').value);
+            
+            const eyeX = currentSeat.x;
+            const eyeY = (currentSeat.eye_elevation_m - baseElevation) * exag;
+            const eyeZ = -currentSeat.y;
+            
+            camera.position.set(eyeX, eyeY, eyeZ);
+            
+            const trackCenter = new THREE.Vector3(0, 0, 0);
+            controls.target.copy(trackCenter);
+            controls.update();
+        }
+
+        function jumpToOrbitView() {
+            camera.position.set(2000, 1500, 2000);
+            controls.target.set(0, 0, 0);
+            controls.update();
         }
 
         function setupControls() {
@@ -407,8 +857,9 @@
             exagSlider.addEventListener('input', () => {
                 exagValue.textContent = exagSlider.value + '×';
                 buildTerrain();
-                buildTrack();
+                buildTrackRibbon();
                 buildCornerMarkers();
+                buildSeatMarker();
             });
             
             document.getElementById('show-terrain').addEventListener('change', (e) => {
@@ -416,17 +867,50 @@
             });
             
             document.getElementById('show-track').addEventListener('change', (e) => {
-                if (trackLine) trackLine.visible = e.target.checked;
-                if (trackTube) trackTube.visible = e.target.checked;
-            });
-            
-            document.getElementById('track-tubes').addEventListener('change', () => {
-                buildTrack();
+                if (trackRibbon) trackRibbon.visible = e.target.checked;
             });
             
             document.getElementById('show-corners').addEventListener('change', (e) => {
                 cornerMarkers.forEach(m => m.visible = e.target.checked);
             });
+            
+            document.getElementById('seat-select').addEventListener('change', (e) => {
+                const seatId = e.target.value;
+                if (seatId && trackData.preset_seats) {
+                    const seat = trackData.preset_seats.find(s => s.id === seatId);
+                    if (seat) selectSeat(seat);
+                }
+            });
+            
+            document.getElementById('eye-height').addEventListener('input', (e) => {
+                const height = parseFloat(e.target.value);
+                document.getElementById('eye-height-value').textContent = height + 'm';
+                
+                if (currentSeat && !currentSeat.id) {
+                    const viewshed = computeViewshedForPosition(
+                        currentSeat.x, currentSeat.y,
+                        currentSeat.ground_elevation_m, height
+                    );
+                    
+                    currentSeat.eye_height_m = height;
+                    currentSeat.eye_elevation_m = currentSeat.ground_elevation_m + height;
+                    currentSeat.visibility = viewshed.visibility;
+                    currentSeat.visible_pct = viewshed.visible_pct;
+                    currentSeat.visible_length_m = viewshed.visible_length_m;
+                    currentVisibility = viewshed.visibility;
+                    
+                    buildTrackRibbon();
+                    buildCornerMarkers();
+                    buildSeatMarker();
+                    updateVisibilityStats();
+                    
+                    document.getElementById('seat-elevation').textContent = 
+                        `Ground: ${currentSeat.ground_elevation_m.toFixed(0)}m, Eye: ${currentSeat.eye_elevation_m.toFixed(0)}m`;
+                }
+            });
+            
+            document.getElementById('btn-eye-view').addEventListener('click', jumpToEyeView);
+            document.getElementById('btn-orbit-view').addEventListener('click', jumpToOrbitView);
         }
 
         function onResize() {

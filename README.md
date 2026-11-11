@@ -2,6 +2,49 @@
 
 AI-collaborative race-track design lab (exploration)
 
+## Spike 2: Grandstand View Analysis
+
+Building on Spike 1, this spike answers: **can the "arena" feeling of a circuit be turned into a number?**
+
+The Red Bull Ring is known for its excellent spectator sightlines—you can see much of the lap from any grandstand thanks to the natural bowl-shaped terrain. This spike quantifies that by computing line-of-sight visibility from any seat position over the DEM.
+
+![Grandstand View Screenshot](docs/viewshed_screenshot.png)
+
+### Key Features
+
+- **Track Ribbon**: The track is now rendered as a proper ~12m wide ribbon draped on terrain (no more z-fighting)
+- **Visibility Highlighting**: Track sections are colored by visibility—cyan for visible, red for hidden
+- **Interactive Seat Placement**: Click anywhere on the terrain to place a spectator seat
+- **Preset Grandstands**: Main Grandstand and Turn 1 Grandstand positions with precomputed visibility
+- **Eye View Camera**: Jump to see the track from the spectator's eye level
+- **CLI Viewshed**: `make viewshed SEAT=lat,lon` computes visibility from command line
+
+### Visibility Results
+
+| Position | Visible % | Sees Start/Finish | Visible Corners |
+|----------|-----------|-------------------|-----------------|
+| Main Grandstand | 84.2% | ✓ Yes | 10/11 |
+| Turn 1 Grandstand | 84.2% | ✓ Yes | 10/11 |
+| NE Corner (poor) | 2.5% | ✗ No | 0/11 |
+| North Hills | 68.2% | ✓ Yes | 8/11 |
+
+The main grandstand at the Red Bull Ring can see **84% of the track** including the start/finish straight and 10 of 11 corners—confirming the "arena" reputation is real and measurable.
+
+### Viewshed CLI
+
+```bash
+# Compute visibility from main grandstand
+make viewshed SEAT=main_grandstand
+
+# Compute visibility from custom coordinates
+make viewshed SEAT=47.2194,14.7630
+
+# List available preset seats
+make viewshed
+```
+
+---
+
 ## Spike 1: Terrain + Centreline
 
 This spike fetches real elevation data for the **Red Bull Ring** (Spielberg, Austria) and drapes the circuit centreline over it, displaying both in an interactive 3D viewer.
@@ -86,6 +129,7 @@ make analyze     # Analyze track profile
 make viewer-data # Export data for 3D viewer
 make serve       # Start local server at http://localhost:8000
 make stats       # Print track statistics (CLI)
+make viewshed    # Compute viewshed (usage: make viewshed SEAT=lat,lon)
 make verify      # Run offline verification tests (uses committed fixture)
 make clean       # Remove generated files (keeps cache)
 ```
@@ -106,6 +150,7 @@ track-lab/
 ├── scripts/
 │   ├── fetch_dem.py      # Download Copernicus DEM tiles
 │   ├── analyze_track.py  # Compute track statistics
+│   ├── compute_viewshed.py # Line-of-sight visibility calculation
 │   ├── export_viewer_data.py
 │   ├── serve.py          # Simple HTTP server
 │   └── verify.py         # Offline verification tests
