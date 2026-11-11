@@ -24,3 +24,6 @@ Thumbs.db
 
 # Analysis output (regenerated from centreline + DEM)
 data/analysis.json
+
+# Test artifacts (fixture DEM is committed)
+data/fixtures/analysis_test.json

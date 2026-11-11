@@ -6,6 +6,8 @@ AI-collaborative race-track design lab (exploration)
 
 This spike fetches real elevation data for the **Red Bull Ring** (Spielberg, Austria) and drapes the circuit centreline over it, displaying both in an interactive 3D viewer.
 
+![3D Viewer Screenshot](docs/viewer_screenshot.png)
+
 ### Quick Start
 
 ```bash
@@ -27,6 +29,7 @@ That's it! The viewer shows the track in its valley with orbit/zoom controls and
 - **Centreline GeoJSON** (`data/centrelines/red_bull_ring.geojson`) — editable track centerline
 - **3D Viewer** — Three.js terrain mesh with draped track, corner markers, and stats panel
 - **CLI Analysis** — `make stats` prints length, elevation, gradients, corner radii
+- **Verification** — `make verify` runs offline tests against official circuit data
 
 ### Data Sources & Attribution
 
@@ -52,18 +55,20 @@ That's it! The viewer shows the track in its valley with orbit/zoom controls and
 
 ### Calibration: Red Bull Ring
 
-Computed values vs published circuit data:
+Computed values vs official circuit data from the [FIA Media Kit (2026 Austrian GP)](https://www.fia.com/sites/default/files/media_kit_-_2026_austrian_grand_prix.pdf):
 
-| Metric | Computed | Official | Source |
-|--------|----------|----------|--------|
-| Length | 4,306 m | 4,326 m | [Wikipedia](https://en.wikipedia.org/wiki/Red_Bull_Ring) |
-| Elevation range | 63 m | ~65 m (est.) | Circuit profiles |
-| Max gradient | 12.6% | 12% | [redbullring.com](https://www.redbullring.com/en/) (T2 area) |
+| Metric | Computed | Official | Diff |
+|--------|----------|----------|------|
+| Length | 4,306 m | 4,326 m | -20 m (0.5%) |
+| Elevation change | 63 m | 65 m | -2 m |
+| Max uphill gradient | 12.6% | 12% | +0.6% |
+| Max downhill gradient | 7.7% | 9.3% | -1.6% |
+| Base altitude | 678 m | 677 m | +1 m |
 
 **Why the differences?**
-- **Length (20m / 0.5% short):** OSM centreline follows approximate track center, not the official racing line measured at 1m from edge. Also, our centreline has 81 vertices interpolated to ~10m spacing — official measurements may use different reference points.
-- **Gradients:** Published "12% at T2" matches our 12.6% max uphill within DEM resolution (~30m horizontal, ~1m vertical accuracy).
-- **Corner radii:** Computed from curvature of the smoothed centreline. Tightest corner shows R≈15m which is plausible for T3 (the slowest corner).
+- **Length (20m / 0.5% short):** OSM centreline follows approximate track center, not the FIA racing line. The FIA notes: "The center line is used for the measurement, rather than the ideal racing line."
+- **Gradients:** Computed from DEM with 100m rolling window. Max uphill (12.6%) matches published 12% closely. Max downhill (7.7%) is lower than published 9.3%, likely due to centreline smoothing or DEM resolution.
+- **Elevation:** 63m range vs official 65m — within DEM vertical accuracy (~1-2m).
 
 ### How Noise is Handled
 
@@ -81,7 +86,7 @@ make analyze     # Analyze track profile
 make viewer-data # Export data for 3D viewer
 make serve       # Start local server at http://localhost:8000
 make stats       # Print track statistics (CLI)
-make verify      # Run offline verification tests
+make verify      # Run offline verification tests (uses committed fixture)
 make clean       # Remove generated files (keeps cache)
 ```
 
@@ -91,8 +96,10 @@ make clean       # Remove generated files (keeps cache)
 track-lab/
 ├── data/
 │   ├── centrelines/      # GeoJSON track centerlines (committed)
+│   ├── fixtures/         # Test fixture DEM crop (committed, ~30KB)
 │   └── analysis.json     # Generated analysis output
 ├── cache/                # Downloaded DEM tiles (gitignored)
+├── docs/                 # Screenshots and documentation assets
 ├── viewer/
 │   ├── index.html        # 3D viewer (Three.js)
 │   └── data/             # Generated terrain/track JSON (gitignored)

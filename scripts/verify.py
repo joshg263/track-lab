@@ -2,35 +2,37 @@
 """
 Verification script for track-lab.
 
-Runs offline-safe checks:
+Runs offline-safe checks using a committed DEM fixture:
 1. GeoJSON structure validity
-2. Analysis output sanity
+2. Real analysis pipeline on fixture DEM
 3. Calibration against published Red Bull Ring figures
 
-Uses cached DEM data or a small fixture if no cache exists.
+The fixture DEM (data/fixtures/red_bull_ring_dem.tif) is a cropped region
+of the full Copernicus tile, small enough to commit (~30KB).
 """
 
 import json
-import math
 import os
+import subprocess
 import sys
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_DIR = SCRIPT_DIR.parent
 
+# Official figures from FIA Media Kit for 2026 Austrian Grand Prix
+# Source: https://www.fia.com/sites/default/files/media_kit_-_2026_austrian_grand_prix.pdf
 PUBLISHED_RED_BULL_RING = {
-    "length_m": 4326,          # Official FIA length (2025 layout)
-    "length_tolerance_m": 150, # Accept ±150m due to centreline vs racing line
-    "turns": 10,
-    "altitude_approx_m": 721,  # From circuit data
-    "altitude_tolerance_m": 50,
-    "max_gradient_pct": 12,    # Published 12% at T2 uphill
-    "gradient_tolerance_pct": 5,
-    "sources": [
-        "https://en.wikipedia.org/wiki/Red_Bull_Ring",
-        "https://www.redbullring.com/en/",
-    ]
+    "length_m": 4326,
+    "length_tolerance_m": 150,  # Accept ±150m (centreline vs racing line)
+    "elevation_change_m": 65,   # "Change in elevation: 65 m"
+    "elevation_tolerance_m": 10,
+    "max_uphill_pct": 12.0,     # "Maximum uphill slope: 12 %"
+    "max_downhill_pct": 9.3,    # "Maximum downhill slope: 9.3 %"
+    "gradient_tolerance_pct": 3.0,
+    "altitude_m": 677,          # "Sea level: 677 m"
+    "source": "FIA Official Media Kit, 2026 Austrian Grand Prix",
+    "source_url": "https://www.fia.com/sites/default/files/media_kit_-_2026_austrian_grand_prix.pdf"
 }
 
 
@@ -63,37 +65,44 @@ def test_geojson_valid():
     assert 14.5 < min(lons) < 15, f"Longitude out of range for Austria: {min(lons)}"
     assert 47 < min(lats) < 48, f"Latitude out of range for Austria: {min(lats)}"
     
-    print("✓ GeoJSON valid: {} points in Austria region".format(len(coords)))
+    print(f"✓ GeoJSON valid: {len(coords)} points in Austria region")
     return True
 
 
-def test_analysis_exists():
-    """Check analysis output exists and has required fields."""
-    path = PROJECT_DIR / "data" / "analysis.json"
+def test_fixture_exists():
+    """Check DEM fixture exists."""
+    fixture_path = PROJECT_DIR / "data" / "fixtures" / "red_bull_ring_dem.tif"
+    assert fixture_path.exists(), f"DEM fixture not found: {fixture_path}"
     
-    if not path.exists():
-        # Try to generate it if DEM is cached
-        dem_path = PROJECT_DIR / "cache" / "dem" / "Copernicus_DSM_COG_10_N47_00_E014_00_DEM.tif"
-        if dem_path.exists():
-            print("  Generating analysis from cached DEM...")
-            import subprocess
-            result = subprocess.run([
-                sys.executable, 
-                str(SCRIPT_DIR / "analyze_track.py"),
-                str(PROJECT_DIR / "data" / "centrelines" / "red_bull_ring.geojson"),
-                str(dem_path),
-                "-o", str(path)
-            ], capture_output=True, text=True)
-            if result.returncode != 0:
-                print(result.stderr)
-                raise RuntimeError("Failed to generate analysis")
-        else:
-            # Use fixture data for offline testing
-            print("  No DEM cache, using fixture values for verification")
-            return create_fixture_analysis()
+    size_kb = fixture_path.stat().st_size / 1024
+    print(f"✓ DEM fixture exists: {size_kb:.1f} KB")
+    return fixture_path
+
+
+def run_analysis(fixture_dem: Path) -> dict:
+    """Run the actual analysis pipeline on the fixture DEM."""
+    centreline = PROJECT_DIR / "data" / "centrelines" / "red_bull_ring.geojson"
+    output = PROJECT_DIR / "data" / "fixtures" / "analysis_test.json"
     
-    with open(path) as f:
+    print("  Running analysis pipeline on fixture DEM...")
+    result = subprocess.run([
+        sys.executable,
+        str(SCRIPT_DIR / "analyze_track.py"),
+        str(centreline),
+        str(fixture_dem),
+        "-o", str(output),
+        "--smooth", "3"
+    ], capture_output=True, text=True)
+    
+    if result.returncode != 0:
+        print(f"  STDERR: {result.stderr}")
+        raise RuntimeError(f"Analysis failed: {result.returncode}")
+    
+    with open(output) as f:
         data = json.load(f)
+    
+    # Clean up test output
+    output.unlink(missing_ok=True)
     
     required = [
         "length_m", "min_elevation_m", "max_elevation_m", 
@@ -105,72 +114,68 @@ def test_analysis_exists():
     for field in required:
         assert field in data, f"Missing field: {field}"
     
-    print("✓ Analysis output valid: all required fields present")
+    print(f"✓ Analysis completed: {data['num_points']} points analyzed")
     return data
 
 
-def create_fixture_analysis():
-    """Create fixture analysis data for offline testing."""
-    fixture = {
-        "length_m": 4350,
-        "min_elevation_m": 663,
-        "max_elevation_m": 740,
-        "elevation_range_m": 77,
-        "total_elevation_change_m": 280,
-        "max_uphill_gradient_pct": 11.5,
-        "max_downhill_gradient_pct": -9.2,
-        "corners": [
-            {"position_m": 200, "radius_m": 35},
-            {"position_m": 800, "radius_m": 42},
-            {"position_m": 2100, "radius_m": 55},
-        ]
-    }
-    return fixture
-
-
-def test_calibration(analysis):
+def test_calibration(analysis: dict) -> bool:
     """Compare computed values against published figures."""
     pub = PUBLISHED_RED_BULL_RING
+    all_ok = True
+    
+    print(f"\nSource: {pub['source']}")
+    print(f"URL: {pub['source_url']}\n")
     
     # Length check
     length_diff = abs(analysis["length_m"] - pub["length_m"])
     length_ok = length_diff <= pub["length_tolerance_m"]
     status = "✓" if length_ok else "✗"
-    print(f"{status} Length: {analysis['length_m']:.0f}m (published: {pub['length_m']}m, diff: {length_diff:.0f}m)")
-    
+    print(f"{status} Length: {analysis['length_m']:.0f}m (official: {pub['length_m']}m, diff: {length_diff:.0f}m)")
     if not length_ok:
-        print(f"  Note: OSM centreline differs from official racing line measurement")
+        all_ok = False
     
     # Elevation range check
     elev_range = analysis["elevation_range_m"]
-    elev_ok = 50 < elev_range < 150  # Reasonable range for this circuit
+    elev_diff = abs(elev_range - pub["elevation_change_m"])
+    elev_ok = elev_diff <= pub["elevation_tolerance_m"]
     status = "✓" if elev_ok else "✗"
-    print(f"{status} Elevation range: {elev_range:.0f}m (expected: 60-100m)")
+    print(f"{status} Elevation change: {elev_range:.0f}m (official: {pub['elevation_change_m']}m, diff: {elev_diff:.0f}m)")
+    if not elev_ok:
+        all_ok = False
     
-    # Gradient check
+    # Altitude check (min elevation should be near sea level figure)
+    min_elev = analysis["min_elevation_m"]
+    altitude_diff = abs(min_elev - pub["altitude_m"])
+    altitude_ok = altitude_diff <= 20  # Within 20m of official altitude
+    status = "✓" if altitude_ok else "✗"
+    print(f"{status} Min altitude: {min_elev:.0f}m (official base: {pub['altitude_m']}m, diff: {altitude_diff:.0f}m)")
+    if not altitude_ok:
+        all_ok = False
+    
+    # Max uphill gradient check
     max_up = analysis["max_uphill_gradient_pct"]
-    gradient_diff = abs(max_up - pub["max_gradient_pct"])
-    gradient_ok = gradient_diff <= pub["gradient_tolerance_pct"]
-    status = "✓" if gradient_ok else "✗"
-    print(f"{status} Max uphill: {max_up:.1f}% (published: {pub['max_gradient_pct']}%, diff: {gradient_diff:.1f}%)")
+    up_diff = abs(max_up - pub["max_uphill_pct"])
+    up_ok = up_diff <= pub["gradient_tolerance_pct"]
+    status = "✓" if up_ok else "✗"
+    print(f"{status} Max uphill: {max_up:.1f}% (official: {pub['max_uphill_pct']}%, diff: {up_diff:.1f}%)")
+    if not up_ok:
+        all_ok = False
     
-    # Corner count sanity
+    # Max downhill gradient check
+    max_down = abs(analysis["max_downhill_gradient_pct"])
+    down_diff = abs(max_down - pub["max_downhill_pct"])
+    down_ok = down_diff <= pub["gradient_tolerance_pct"]
+    status = "✓" if down_ok else "✗"
+    print(f"{status} Max downhill: {max_down:.1f}% (official: {pub['max_downhill_pct']}%, diff: {down_diff:.1f}%)")
+    if not down_ok:
+        all_ok = False
+    
+    # Corner count sanity (not an official figure, just plausibility)
     corners = analysis.get("corners", [])
-    corner_ok = len(corners) >= 5  # Should find at least 5 significant corners
-    status = "✓" if corner_ok else "✗"
-    print(f"{status} Corners found: {len(corners)} (expected ≥5 significant corners)")
+    corner_ok = len(corners) >= 5
+    status = "✓" if corner_ok else "!"
+    print(f"{status} Corners detected: {len(corners)} (sanity check: ≥5)")
     
-    # Plausibility checks for corner radii
-    if corners:
-        min_radius = min(c["radius_m"] for c in corners)
-        radius_ok = 15 < min_radius < 100  # F1 turns are typically 20-80m radius
-        status = "✓" if radius_ok else "!"
-        print(f"{status} Tightest corner: R={min_radius:.0f}m (plausible: 20-80m)")
-        
-        if min_radius < 15:
-            print(f"  Warning: Very tight corner may be DEM noise artifact")
-    
-    all_ok = length_ok and elev_ok and gradient_ok and corner_ok
     return all_ok
 
 
@@ -181,7 +186,7 @@ def test_viewer_data():
     
     if not terrain_path.exists() or not track_path.exists():
         print("- Viewer data not generated (run 'make viewer-data')")
-        return True  # Not a failure, just not generated yet
+        return True
     
     with open(terrain_path) as f:
         terrain = json.load(f)
@@ -210,19 +215,22 @@ def main():
     test_geojson_valid()
     print()
     
-    print("2. Analysis Output")
+    print("2. DEM Fixture")
     print("-" * 40)
-    analysis = test_analysis_exists()
+    fixture_dem = test_fixture_exists()
     print()
     
-    print("3. Calibration vs Published Data")
+    print("3. Analysis Pipeline (on fixture)")
     print("-" * 40)
-    print(f"Sources: {', '.join(PUBLISHED_RED_BULL_RING['sources'])}")
+    analysis = run_analysis(fixture_dem)
     print()
+    
+    print("4. Calibration vs Official Data")
+    print("-" * 40)
     calibration_ok = test_calibration(analysis)
     print()
     
-    print("4. Viewer Data")
+    print("5. Viewer Data (optional)")
     print("-" * 40)
     test_viewer_data()
     print()
@@ -230,12 +238,11 @@ def main():
     print("=" * 60)
     if calibration_ok:
         print("VERIFICATION PASSED")
+        return 0
     else:
-        print("VERIFICATION COMPLETED (with notes)")
-        print("See calibration notes above for expected differences.")
-    print("=" * 60)
-    
-    return 0
+        print("VERIFICATION FAILED")
+        print("Computed values outside tolerance of official figures.")
+        return 1
 
 
 if __name__ == "__main__":
