@@ -125,3 +125,38 @@ clean:
 clean-all: clean
 	rm -rf cache
 	@echo "Cleaned everything including cache"
+
+# ============================================================
+# Japan Site Scout (Spike 4)
+# ============================================================
+
+.PHONY: site-scout site-scout-data site-scout-verify site-scout-screenshots
+
+# Run the full site scouting pipeline (Kansai region)
+site-scout:
+	@echo "Running Kansai site scouting pipeline..."
+	$(PYTHON) scripts/site_scout/kansai_scan.py
+	@echo ""
+	@echo "Generating viewer data for selected sites..."
+	$(PYTHON) scripts/site_scout/generate_site_data.py
+	$(PYTHON) scripts/site_scout/export_viewer_data.py
+	@echo ""
+	@echo "Site scouting complete! View sites at http://localhost:8000/site.html"
+
+# Generate viewer data for committed sites (offline, no network)
+site-scout-data:
+	@echo "Exporting viewer data for committed sites..."
+	$(PYTHON) scripts/site_scout/export_viewer_data.py
+	@echo "Done."
+
+# Verify site scout results
+site-scout-verify:
+	@echo "Running site scout verification..."
+	$(PYTHON) scripts/site_scout/verify_sites.py
+	@echo ""
+	@echo "All site scout checks passed!"
+
+# Take screenshots of Japan sites (requires 'make serve' running)
+site-scout-screenshots:
+	@echo "Taking screenshots of Japan sites..."
+	scripts/site_screenshot.sh

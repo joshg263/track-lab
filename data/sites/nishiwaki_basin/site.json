@@ -1,0 +1,44 @@
+{
+  "slug": "nishiwaki_basin",
+  "name": "Nishiwaki Basin",
+  "prefecture": "Hyogo",
+  "lat": 34.99069,
+  "lon": 135.01069,
+  "nearest_town": {
+    "name": "Nishiwaki",
+    "distance_m": 2769
+  },
+  "why_it_fits": "Natural bowl with 2.4km floor diameter, 127m relief (within 50-150m target), rim slopes 7-33\u00b0 over 350m contiguous stretch. Best rim viewpoint sees 57.5% of floor vs 16.8% mean from floor points.",
+  "metrics": {
+    "floor_elev_m": 76.3,
+    "rim_elev_m": 193.3,
+    "relief_m": 117.0,
+    "diameter_m": 1763.0,
+    "floor_flat_pct": 51.6,
+    "rim_slope_range": [
+      20.5,
+      32.5
+    ],
+    "best_viewpoint": {
+      "lat": 34.99125,
+      "lon": 135.00958,
+      "visibility_pct": 63.6,
+      "elevation_m": 183.4,
+      "row": 32,
+      "col": 35
+    },
+    "floor_center_visibility_pct": 9.0,
+    "dem_rows": 88,
+    "dem_cols": 92,
+    "cell_size_m": 25.33
+  },
+  "files": {
+    "dem": "dem.tif",
+    "imagery": "imagery.jpg",
+    "imagery_meta": "imagery.json"
+  },
+  "attribution": [
+    "Elevation: Copernicus DEM GLO-30 (ESA / Copernicus)",
+    "Sentinel-2 cloudless - https://s2maps.eu by EOX IT Services GmbH (Contains modified Copernicus Sentinel data 2016 & 2017), CC BY 4.0"
+  ]
+}

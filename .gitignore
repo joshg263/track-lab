@@ -1,4 +1,4 @@
-# Cache - large DEM tiles
+# Cache - large DEM tiles and site scout working data
 cache/
 
 # Generated viewer data (can regenerate from cache)

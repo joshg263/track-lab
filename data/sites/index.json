@@ -1,0 +1,42 @@
+{
+  "sites": [
+    {
+      "slug": "nishiwaki_basin",
+      "name": "Nishiwaki Basin",
+      "prefecture": "Hyogo",
+      "lat": 34.99069,
+      "lon": 135.01069,
+      "metrics": {
+        "floor_elev_m": 76.3,
+        "rim_elev_m": 193.3,
+        "relief_m": 117.0,
+        "diameter_m": 1763.0,
+        "floor_flat_pct": 51.6,
+        "rim_slope_range": [
+          20.5,
+          32.5
+        ],
+        "best_viewpoint": {
+          "lat": 34.99125,
+          "lon": 135.00958,
+          "visibility_pct": 63.6,
+          "elevation_m": 183.4,
+          "row": 32,
+          "col": 35
+        },
+        "floor_center_visibility_pct": 9.0,
+        "dem_rows": 88,
+        "dem_cols": 92,
+        "cell_size_m": 25.33
+      },
+      "best_viewpoint": {
+        "lat": 34.99125,
+        "lon": 135.00958,
+        "visibility_pct": 63.6,
+        "elevation_m": 183.4,
+        "row": 32,
+        "col": 35
+      }
+    }
+  ]
+}
