@@ -22,7 +22,7 @@
             font-size: 13px;
             z-index: 100;
         }
-        #controls { top: 20px; left: 20px; max-width: 300px; }
+        #controls { top: 20px; left: 20px; max-width: 320px; }
         #controls h2 { margin-bottom: 10px; font-size: 16px; color: #ff6b6b; }
         #controls h3 {
             margin-top: 12px; margin-bottom: 8px; font-size: 13px;
@@ -55,12 +55,16 @@
         .site-info .metric { margin-top: 4px; }
         .site-info .value { color: #00ffcc; font-weight: bold; }
 
-        #stats { top: 20px; right: 20px; max-width: 240px; }
+        #stats { top: 20px; right: 20px; max-width: 260px; }
         #stats h2 { margin-bottom: 10px; font-size: 16px; color: #4ecdc4; }
+        #stats h3 { margin-top: 10px; margin-bottom: 6px; font-size: 12px; color: #f9ca24; }
         #stats table { width: 100%; border-collapse: collapse; }
-        #stats td { padding: 3px 0; }
+        #stats td { padding: 3px 0; font-size: 12px; }
         #stats td:first-child { color: #888; }
         #stats td:last-child { text-align: right; font-family: monospace; color: #00ffcc; }
+        #stats .pass { color: #00ffcc; }
+        #stats .fail { color: #ff4444; }
+        #stats .info { color: #aaa; }
 
         #loading {
             position: fixed; top: 50%; left: 50%;
@@ -90,6 +94,29 @@
             white-space: nowrap;
             border: 2px solid #f9ca24;
         }
+        .corner-label {
+            background: rgba(0, 0, 0, 0.85);
+            color: #fff;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 11px;
+            font-weight: bold;
+            pointer-events: none;
+            white-space: nowrap;
+            border: 1px solid #666;
+        }
+        .corner-label.start-finish {
+            background: rgba(0, 0, 0, 0.9);
+            color: #f9ca24;
+            border: 2px solid #f9ca24;
+        }
+        .layout-direction {
+            font-size: 11px;
+            color: #aaa;
+            margin-top: 8px;
+            font-style: italic;
+            line-height: 1.4;
+        }
     </style>
 </head>
 <body>
@@ -112,6 +139,15 @@
             <div class="metric">Rim slopes: <span class="value" id="site-rim-slopes">-</span></div>
         </div>
 
+        <h3>🏎️ Track Layout</h3>
+        <label>
+            Layout
+            <select id="layout-select">
+                <option value="">None</option>
+            </select>
+        </label>
+        <div id="layout-direction" class="layout-direction" style="display: none;"></div>
+
         <h3>📍 Viewpoint</h3>
         <div>
             <button id="btn-best-viewpoint" class="viewpoint">🔭 Best Viewpoint</button>
@@ -127,6 +163,8 @@
             <input type="range" id="exaggeration" min="1" max="5" step="0.5" value="1.5">
             <span id="exag-value">1.5×</span>
         </label>
+        <label><input type="checkbox" id="show-layout" checked> Show layout ribbon</label>
+        <label><input type="checkbox" id="show-labels" checked> Show corner labels</label>
     </div>
 
     <div id="stats" class="panel">
@@ -139,6 +177,11 @@
             <tr><td>Relief</td><td id="stat-relief">-</td></tr>
         </table>
         <div id="why-fits" style="margin-top: 12px; font-size: 11px; color: #f9ca24; font-style: italic;"></div>
+        
+        <div id="layout-stats" style="display: none;">
+            <h3>Layout Checks</h3>
+            <table id="layout-checks-table"></table>
+        </div>
     </div>
 
     <div class="help" id="help">
@@ -165,18 +208,25 @@
         const SITES_BASE = 'data/sites';
 
         let scene, camera, renderer, labelRenderer, controls, world, sky, sun;
-        let terrainMesh, viewpointMarker;
+        let terrainMesh, viewpointMarker, trackGroup;
         let terrain, terrainMeta, sceneData;
         let frame = { lon0: 0, lat0: 0, sx: 111320, sy: 111320 };
         let baseElevation = 0;
         let sitesIndex = [];
         let currentSite = null;
+        let currentLayout = null;
+        let layoutPoints = null;
+        let cornerLabels = [];
         let atViewpoint = false;
 
         const ORBIT_FOV = 50;
         const SUN_ELEVATION_DEG = 45;
         const SUN_AZIMUTH_DEG = 180;
         const HAZE_COLOR = new THREE.Color(0xc9d8e8);
+        const TRACK_WIDTH = 14;
+        const RIBBON_OFFSET = 3;
+        const TRACK_COLOR = 0x00ccff;
+        const OUTLINE_COLOR = 0x111111;
 
         async function loadBinary(url, Type) {
             const res = await fetch(url);
@@ -202,6 +252,37 @@
                 return sitesIndex;
             } catch (e) {
                 console.error('Failed to load sites index:', e);
+                return [];
+            }
+        }
+
+        async function loadLayoutsIndex(slug) {
+            const select = document.getElementById('layout-select');
+            select.innerHTML = '<option value="">None</option>';
+            
+            if (!slug) return [];
+            
+            try {
+                const layoutFiles = ['layout_a_straight_hairpin', 'layout_b_elevation_sweep', 'layout_c_arena'];
+                const layouts = [];
+                
+                for (const name of layoutFiles) {
+                    try {
+                        const res = await fetch(`${SITES_BASE}/${slug}/layouts/${name}.json`);
+                        if (res.ok) {
+                            const layout = await res.json();
+                            layouts.push(layout);
+                            const opt = document.createElement('option');
+                            opt.value = name;
+                            opt.textContent = layout.name || name;
+                            select.appendChild(opt);
+                        }
+                    } catch (e) { }
+                }
+                
+                return layouts;
+            } catch (e) {
+                console.error('Failed to load layouts:', e);
                 return [];
             }
         }
@@ -251,6 +332,16 @@
                 updateSiteUI();
                 setDefaultCamera();
                 
+                await loadLayoutsIndex(slug);
+                
+                const requestedLayout = params.get('layout');
+                if (requestedLayout) {
+                    document.getElementById('layout-select').value = requestedLayout;
+                    await loadLayout(requestedLayout);
+                } else {
+                    clearLayout();
+                }
+                
                 document.getElementById('loading').style.display = 'none';
                 document.getElementById('attribution').textContent = sceneData.attribution?.join(' · ') || '';
                 
@@ -260,6 +351,400 @@
                 document.getElementById('loading').textContent = `Error loading ${slug}`;
                 return null;
             }
+        }
+
+        async function loadLayout(name) {
+            if (!name || !currentSite) {
+                clearLayout();
+                return;
+            }
+            
+            try {
+                const res = await fetch(`${SITES_BASE}/${currentSite.slug}/layouts/${name}.json`);
+                if (!res.ok) throw new Error(`Layout not found: ${name}`);
+                
+                currentLayout = await res.json();
+                layoutPoints = interpolateLayout(currentLayout);
+                
+                buildTrackRibbon();
+                buildCornerLabels();
+                updateLayoutUI();
+                
+                document.getElementById('layout-direction').textContent = currentLayout.direction || '';
+                document.getElementById('layout-direction').style.display = currentLayout.direction ? 'block' : 'none';
+            } catch (e) {
+                console.error('Failed to load layout:', e);
+                clearLayout();
+            }
+        }
+
+        function clearLayout() {
+            currentLayout = null;
+            layoutPoints = null;
+            
+            if (trackGroup) {
+                world.remove(trackGroup);
+                trackGroup = null;
+            }
+            
+            cornerLabels.forEach(l => { if (l.parent) l.parent.remove(l); });
+            cornerLabels = [];
+            
+            document.getElementById('layout-stats').style.display = 'none';
+            document.getElementById('layout-direction').style.display = 'none';
+        }
+
+        function catmullRomSpline(points, numSamples, closed = true) {
+            const n = points.length;
+            if (n < 2) return points.slice();
+            
+            const pts = closed 
+                ? [points[n-1], ...points, points[0], points[1]]
+                : [points[0], ...points, points[n-1]];
+            
+            const result = [];
+            const numSegments = closed ? n : n - 1;
+            const samplesPerSegment = Math.ceil(numSamples / numSegments);
+            
+            for (let i = 0; i < numSegments; i++) {
+                const p0 = pts[i], p1 = pts[i+1], p2 = pts[i+2], p3 = pts[i+3];
+                
+                const d1 = Math.sqrt((p1.x-p0.x)**2 + (p1.y-p0.y)**2) || 0.001;
+                const d2 = Math.sqrt((p2.x-p1.x)**2 + (p2.y-p1.y)**2) || 0.001;
+                const d3 = Math.sqrt((p3.x-p2.x)**2 + (p3.y-p2.y)**2) || 0.001;
+                
+                const t0 = 0;
+                const t1 = t0 + Math.pow(d1, 0.5);
+                const t2 = t1 + Math.pow(d2, 0.5);
+                const t3 = t2 + Math.pow(d3, 0.5);
+                
+                for (let s = 0; s < samplesPerSegment; s++) {
+                    const t = t1 + (t2 - t1) * s / samplesPerSegment;
+                    
+                    const a1x = (t1 - t) / (t1 - t0) * p0.x + (t - t0) / (t1 - t0) * p1.x;
+                    const a1y = (t1 - t) / (t1 - t0) * p0.y + (t - t0) / (t1 - t0) * p1.y;
+                    const a2x = (t2 - t) / (t2 - t1) * p1.x + (t - t1) / (t2 - t1) * p2.x;
+                    const a2y = (t2 - t) / (t2 - t1) * p1.y + (t - t1) / (t2 - t1) * p2.y;
+                    const a3x = (t3 - t) / (t3 - t2) * p2.x + (t - t2) / (t3 - t2) * p3.x;
+                    const a3y = (t3 - t) / (t3 - t2) * p2.y + (t - t2) / (t3 - t2) * p3.y;
+                    
+                    const b1x = (t2 - t) / (t2 - t0) * a1x + (t - t0) / (t2 - t0) * a2x;
+                    const b1y = (t2 - t) / (t2 - t0) * a1y + (t - t0) / (t2 - t0) * a2y;
+                    const b2x = (t3 - t) / (t3 - t1) * a2x + (t - t1) / (t3 - t1) * a3x;
+                    const b2y = (t3 - t) / (t3 - t1) * a2y + (t - t1) / (t3 - t1) * a3y;
+                    
+                    const cx = (t2 - t) / (t2 - t1) * b1x + (t - t1) / (t2 - t1) * b2x;
+                    const cy = (t2 - t) / (t2 - t1) * b1y + (t - t1) / (t2 - t1) * b2y;
+                    
+                    result.push({ x: cx, y: cy });
+                }
+            }
+            
+            return result;
+        }
+
+        function sampleTerrain(x, y) {
+            const lon = frame.lon0 + x / frame.sx;
+            const lat = frame.lat0 + y / frame.sy;
+            
+            const col = (lon - terrain.left) / terrain.resX - 0.5;
+            const row = (terrain.top - lat) / terrain.resY - 0.5;
+            
+            const c0 = Math.min(Math.max(Math.floor(col), 0), terrain.cols - 2);
+            const r0 = Math.min(Math.max(Math.floor(row), 0), terrain.rows - 2);
+            const dc = col - c0;
+            const dr = row - r0;
+            
+            const h = terrain.heights;
+            const n = terrain.cols;
+            return h[r0 * n + c0] * (1-dc) * (1-dr) +
+                   h[r0 * n + c0 + 1] * dc * (1-dr) +
+                   h[(r0+1) * n + c0] * (1-dc) * dr +
+                   h[(r0+1) * n + c0 + 1] * dc * dr;
+        }
+
+        function interpolateLayout(layout) {
+            const controlPts = layout.control_points.map(p => ({ x: p.x, y: p.y }));
+            
+            let approxLength = 0;
+            for (let i = 0; i < controlPts.length; i++) {
+                const j = (i + 1) % controlPts.length;
+                approxLength += Math.sqrt((controlPts[j].x - controlPts[i].x)**2 + 
+                                          (controlPts[j].y - controlPts[i].y)**2);
+            }
+            
+            const numSamples = Math.max(100, Math.round(approxLength / 2));
+            const splinePoints = catmullRomSpline(controlPts, numSamples, true);
+            
+            const points = splinePoints.map((p, i) => {
+                const z = sampleTerrain(p.x, p.y);
+                return { x: p.x, y: p.y, z, index: i };
+            });
+            
+            let distance = 0;
+            for (let i = 0; i < points.length; i++) {
+                if (i > 0) {
+                    const dx = points[i].x - points[i-1].x;
+                    const dy = points[i].y - points[i-1].y;
+                    distance += Math.sqrt(dx*dx + dy*dy);
+                }
+                points[i].distance = distance;
+            }
+            
+            return points;
+        }
+
+        function buildTrackRibbon() {
+            if (trackGroup) {
+                world.remove(trackGroup);
+            }
+            trackGroup = new THREE.Group();
+            
+            if (!layoutPoints || layoutPoints.length < 2) return;
+            
+            const halfWidth = TRACK_WIDTH / 2;
+            const outlineWidth = halfWidth + 2;
+            const points = layoutPoints;
+            const n = points.length;
+            
+            const outlineVerts = [], trackVerts = [];
+            
+            for (let i = 0; i < n; i++) {
+                const p = points[i];
+                const pPrev = points[(i - 1 + n) % n];
+                const pNext = points[(i + 1) % n];
+                
+                const dx = pNext.x - pPrev.x;
+                const dy = pNext.y - pPrev.y;
+                const len = Math.sqrt(dx * dx + dy * dy) || 1;
+                const nx = -dy / len;
+                const ny = dx / len;
+                
+                const centerZ = p.z;
+                const localY = (elev) => elev - baseElevation;
+                
+                const edge = (w) => {
+                    const lx = p.x + nx * w, ly = p.y + ny * w;
+                    const rx = p.x - nx * w, ry = p.y - ny * w;
+                    const lz = Math.max(sampleTerrain(lx, ly), centerZ);
+                    const rz = Math.max(sampleTerrain(rx, ry), centerZ);
+                    return [lx, localY(lz) + RIBBON_OFFSET, -ly, rx, localY(rz) + RIBBON_OFFSET, -ry];
+                };
+                
+                const o = edge(outlineWidth);
+                outlineVerts.push(o[0], o[1] - 0.3, o[2], o[3], o[4] - 0.3, o[5]);
+                trackVerts.push(...edge(halfWidth));
+            }
+            
+            const indices = [];
+            for (let i = 0; i < n; i++) {
+                const i0 = i * 2, i1 = i * 2 + 1;
+                const i2 = ((i + 1) % n) * 2, i3 = ((i + 1) % n) * 2 + 1;
+                indices.push(i0, i2, i1, i1, i2, i3);
+            }
+            
+            const overlay = { 
+                side: THREE.DoubleSide, 
+                depthTest: false, 
+                depthWrite: false, 
+                transparent: true, 
+                fog: false, 
+                toneMapped: false 
+            };
+            
+            const outlineGeo = new THREE.BufferGeometry();
+            outlineGeo.setAttribute('position', new THREE.Float32BufferAttribute(outlineVerts, 3));
+            outlineGeo.setIndex(indices);
+            const outlineMesh = new THREE.Mesh(outlineGeo, 
+                new THREE.MeshBasicMaterial({ color: OUTLINE_COLOR, opacity: 0.9, ...overlay }));
+            outlineMesh.renderOrder = 10;
+            trackGroup.add(outlineMesh);
+            
+            const trackGeo = new THREE.BufferGeometry();
+            trackGeo.setAttribute('position', new THREE.Float32BufferAttribute(trackVerts, 3));
+            trackGeo.setIndex(indices);
+            const trackMesh = new THREE.Mesh(trackGeo, 
+                new THREE.MeshBasicMaterial({ color: TRACK_COLOR, opacity: 1.0, ...overlay }));
+            trackMesh.renderOrder = 11;
+            trackGroup.add(trackMesh);
+            
+            addStartFinishLine();
+            
+            trackGroup.visible = document.getElementById('show-layout').checked;
+            world.add(trackGroup);
+        }
+
+        function addStartFinishLine() {
+            if (!layoutPoints || layoutPoints.length < 2) return;
+            
+            const p0 = layoutPoints[0];
+            const p1 = layoutPoints[1];
+            const dx = p1.x - p0.x;
+            const dy = p1.y - p0.y;
+            const y = p0.z - baseElevation + RIBBON_OFFSET + 0.5;
+            
+            const geometry = new THREE.PlaneGeometry(TRACK_WIDTH + 4, 3);
+            const canvas = document.createElement('canvas');
+            canvas.width = 64; canvas.height = 16;
+            const ctx = canvas.getContext('2d');
+            for (let x = 0; x < canvas.width; x += 8) {
+                for (let yy = 0; yy < canvas.height; yy += 8) {
+                    ctx.fillStyle = ((x + yy) / 8) % 2 === 0 ? '#ffffff' : '#000000';
+                    ctx.fillRect(x, yy, 8, 8);
+                }
+            }
+            const texture = new THREE.CanvasTexture(canvas);
+            texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+            texture.repeat.set(4, 1);
+            
+            const overlay = { 
+                side: THREE.DoubleSide, 
+                depthTest: false, 
+                depthWrite: false, 
+                transparent: true 
+            };
+            const sfLine = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ map: texture, ...overlay }));
+            sfLine.renderOrder = 12;
+            sfLine.rotation.x = -Math.PI / 2;
+            sfLine.rotation.z = -Math.atan2(dy, dx);
+            sfLine.position.set(p0.x, y, -p0.y);
+            trackGroup.add(sfLine);
+        }
+
+        function findCorners() {
+            if (!layoutPoints || layoutPoints.length < 10) return [];
+            
+            const corners = [];
+            const n = layoutPoints.length;
+            
+            for (let i = 0; i < n; i++) {
+                const p0 = layoutPoints[(i - 5 + n) % n];
+                const p1 = layoutPoints[i];
+                const p2 = layoutPoints[(i + 5) % n];
+                
+                const v1x = p1.x - p0.x, v1y = p1.y - p0.y;
+                const v2x = p2.x - p1.x, v2y = p2.y - p1.y;
+                
+                const d1 = Math.sqrt(v1x*v1x + v1y*v1y) || 1;
+                const d2 = Math.sqrt(v2x*v2x + v2y*v2y) || 1;
+                
+                const cross = (v1x * v2y - v1y * v2x) / (d1 * d2);
+                const sinAngle = Math.abs(cross);
+                
+                if (sinAngle > 0.1) {
+                    const arcLength = (d1 + d2) / 2;
+                    const radius = arcLength / (2 * sinAngle);
+                    layoutPoints[i].radius = radius;
+                }
+            }
+            
+            let inCorner = false;
+            let cornerStart = 0;
+            const threshold = 200;
+            
+            for (let i = 0; i < n; i++) {
+                const r = layoutPoints[i].radius || 1e6;
+                if (r < threshold && !inCorner) {
+                    inCorner = true;
+                    cornerStart = i;
+                } else if (r >= threshold && inCorner) {
+                    inCorner = false;
+                    const mid = Math.floor((cornerStart + i) / 2);
+                    const minR = Math.min(...layoutPoints.slice(cornerStart, i).map(p => p.radius || 1e6));
+                    corners.push({
+                        index: mid,
+                        radius: minR,
+                        distance: layoutPoints[mid].distance,
+                        x: layoutPoints[mid].x,
+                        y: layoutPoints[mid].y,
+                        z: layoutPoints[mid].z,
+                    });
+                }
+            }
+            
+            return corners;
+        }
+
+        function buildCornerLabels() {
+            cornerLabels.forEach(l => { if (l.parent) l.parent.remove(l); });
+            cornerLabels = [];
+            
+            if (!layoutPoints || !document.getElementById('show-labels').checked) return;
+            
+            const lift = 15;
+            
+            const sfLabel = document.createElement('div');
+            sfLabel.className = 'corner-label start-finish';
+            sfLabel.textContent = '🏁 S/F';
+            const sfObj = new CSS2DObject(sfLabel);
+            const p0 = layoutPoints[0];
+            sfObj.position.set(p0.x, p0.z - baseElevation + lift, -p0.y);
+            world.add(sfObj);
+            cornerLabels.push(sfObj);
+            
+            const corners = findCorners();
+            corners.forEach((corner, idx) => {
+                const label = document.createElement('div');
+                label.className = 'corner-label';
+                label.textContent = `T${idx + 1}`;
+                const labelObj = new CSS2DObject(label);
+                labelObj.position.set(corner.x, corner.z - baseElevation + lift, -corner.y);
+                world.add(labelObj);
+                cornerLabels.push(labelObj);
+            });
+        }
+
+        function updateLayoutUI() {
+            if (!currentLayout || !layoutPoints) {
+                document.getElementById('layout-stats').style.display = 'none';
+                return;
+            }
+            
+            const n = layoutPoints.length;
+            const lastPt = layoutPoints[n-1];
+            const firstPt = layoutPoints[0];
+            const lapLength = lastPt.distance + Math.sqrt(
+                (firstPt.x - lastPt.x)**2 + (firstPt.y - lastPt.y)**2
+            );
+            
+            const elevs = layoutPoints.map(p => p.z);
+            const elevRange = Math.max(...elevs) - Math.min(...elevs);
+            
+            const corners = findCorners();
+            const minRadius = corners.length > 0 
+                ? Math.min(...corners.map(c => c.radius))
+                : 999;
+            
+            let maxGrad = 0;
+            for (let i = 1; i < n; i++) {
+                const dz = layoutPoints[i].z - layoutPoints[i-1].z;
+                const dd = layoutPoints[i].distance - layoutPoints[i-1].distance;
+                if (dd > 1) {
+                    const grad = Math.abs(dz / dd * 100);
+                    if (grad > maxGrad) maxGrad = grad;
+                }
+            }
+            
+            const checks = [
+                { name: 'Lap length', value: `${(lapLength/1000).toFixed(2)} km`, 
+                  pass: lapLength >= 3500 && lapLength <= 4500, target: '3.5-4.5 km' },
+                { name: 'Min radius', value: `${minRadius.toFixed(0)} m`, 
+                  pass: minRadius >= 15, target: '≥15 m' },
+                { name: 'Corners', value: corners.length, pass: true, target: 'info' },
+                { name: 'Max gradient', value: `${maxGrad.toFixed(1)}%`, 
+                  pass: maxGrad <= 12, target: '≤12%' },
+                { name: 'Elev range', value: `${elevRange.toFixed(0)} m`, 
+                  pass: true, target: 'info' },
+            ];
+            
+            const table = document.getElementById('layout-checks-table');
+            table.innerHTML = checks.map(c => {
+                const cls = c.target === 'info' ? 'info' : (c.pass ? 'pass' : 'fail');
+                const icon = c.target === 'info' ? '' : (c.pass ? '✓' : '✗');
+                return `<tr><td>${c.name}</td><td class="${cls}">${icon} ${c.value}</td></tr>`;
+            }).join('');
+            
+            document.getElementById('layout-stats').style.display = 'block';
         }
 
         function rebuildTerrain(imagery) {
@@ -342,7 +827,7 @@
             
             const label = document.createElement('div');
             label.className = 'viewpoint-marker';
-            label.textContent = `Best VP: ${vp.visibility_pct?.toFixed(0) || '?'}% floor visible`;
+            label.textContent = `Best VP: ${vp.visibility_pct?.toFixed(0) || '?'}% visible`;
             const labelObj = new CSS2DObject(label);
             labelObj.position.y = 18;
             group.add(labelObj);
@@ -542,6 +1027,23 @@
                     await loadSite(e.target.value);
                     history.replaceState(null, '', `?site=${e.target.value}`);
                 }
+            });
+            
+            document.getElementById('layout-select').addEventListener('change', async (e) => {
+                await loadLayout(e.target.value);
+                if (e.target.value) {
+                    const url = new URL(location);
+                    url.searchParams.set('layout', e.target.value);
+                    history.replaceState(null, '', url);
+                }
+            });
+            
+            document.getElementById('show-layout').addEventListener('change', (e) => {
+                if (trackGroup) trackGroup.visible = e.target.checked;
+            });
+            
+            document.getElementById('show-labels').addEventListener('change', (e) => {
+                cornerLabels.forEach(l => l.visible = e.target.checked);
             });
             
             document.getElementById('btn-best-viewpoint').addEventListener('click', goToViewpoint);
