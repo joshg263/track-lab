@@ -2,6 +2,104 @@
 
 AI-collaborative race-track design lab (exploration)
 
+## Spike 3: A real seat, with real obstructions
+
+Spike 2 measured line of sight over bare terrain, so every seat looked like an
+empty hillside and the main grandstand "saw" ~90% of the lap. Spike 3 adds what
+actually blocks a spectator's view, and makes the seat view look like the place.
+
+| | Overview | Main grandstand eye view |
+|---|:---:|:---:|
+| Before | ![Before overview](docs/before_overview.png) | ![Before eye view](docs/before_eyeview.png) |
+| After | ![After overview](docs/after_overview.png) | ![After eye view](docs/after_eyeview.png) |
+
+Turn 1 (Steiermark Tribüne) eye view: ![Turn 1 eye view](docs/after_eyeview_turn1.png)
+
+### Surface model (used by both the Python and the browser viewshed)
+
+`scripts/surface_model.py` builds a 5 m obstruction raster on top of the DEM from
+the committed OSM fixture `data/obstructions/red_bull_ring_osm.geojson`:
+
+| Layer | Source (OSM) | Height |
+|---|---|---|
+| Buildings (438) | `building=*` | `height`, else `building:levels` × 3 m, else 8 m |
+| Grandstands (9) | `building=grandstand` | stand height (`height`/levels, else 12 m); seating deck rises from 2 m at the edge nearest the track at ≥ 0.45 m/m (~24°), then flat |
+| Woodland (210 ha) | `landuse=forest`, `natural=wood`, `natural=tree_row` (6 m wide), `natural=tree` (r 4 m) | canopy 15 m |
+
+The track corridor (12 m either side of the centreline) is always clear, and a
+seat is never blocked by the stand it sits in (the rake that lets you see over
+the rows in front is finer than a 5 m raster). Grandstand presets are generated
+from the OSM stands: seat in the top row of the deck, mid-stand, **eye 1.2 m
+above the tier**. With obstructions switched off the same eye height is used,
+so the difference is purely what the obstructions block.
+
+Line of sight: 256 samples per ray in both Python and JS
+(`viewer/viewshed.js` is a line-for-line port of the Python sampler); target
+1.0 m above the road; bilinear DEM + nearest-cell obstruction height.
+
+### Visible % with obstructions
+
+Viewer numbers (full Copernicus tile, `make viewer-data`):
+
+| Preset (OSM grandstand) | Terrain only | With obstructions |
+|---|---:|---:|
+| **Main Grandstand (Start/Ziel Tribüne)** | 88.3% | **80.0%** |
+| Turn 1 Grandstand (Steiermark Tribüne) | 90.9% | 86.5% |
+| Red Bull Tribüne | 91.1% | 74.3% |
+| Red Bull Tribüne #2 | 89.3% | 69.2% |
+| Tribüne Mitte | 79.5% | 71.1% |
+| Tribüne Nord | 70.6% | 58.2% |
+| Tribüne 13 | 72.7% | 41.9% |
+| Tribüne T10 | 35.9% | 26.8% |
+| Tribüne Ost | 38.9% | 19.1% |
+
+`make verify` runs offline on the committed 30 KB DEM crop, which is resampled
+slightly differently from the full tile, so its numbers differ (main grandstand
+86.5% → 69.9%). It checks that obstructions lower the main grandstand's score,
+that a paddock spot behind the pit building (31.5% → 21.9%) and a spot in the
+woods above Turn 3 (84.6% → 0.0%) lose visibility, that rebuilding the surface
+model gives identical results, and that the JS viewer agrees with Python on all
+nine presets (within 2 pp; currently identical). The parity check needs
+`node` (18+); set `SKIP_JS_PARITY=1` to skip it.
+
+Caveat: Copernicus GLO-30 is itself a surface model at 30 m, so it already
+contains some of the canopy and large roofs; adding OSM heights on top errs
+towards blocking more.
+
+### Viewer
+
+- Terrain draped with a baked **Sentinel-2 cloudless** texture (3 m/px, 270 KB, committed)
+- Extruded OSM buildings, raked grandstands with seat-row stripes, ~26k instanced low-poly trees
+- Three.js `Sky`, sun with soft shadows (static shadow map, re-rendered only when the view changes), ACES tone mapping, distance haze
+- Road surface at true elevation with edge lines, red/white kerbs at corners, grey run-off outside the tight corners
+- Overview keeps the colour-coded visibility ribbon, corner labels and minimap; a checkbox toggles whether obstructions count
+- **Eye view**: 1 s animated flight into the seat, vertical exaggeration flattens to 1×, 60° vertical FOV, initial look at the centroid of the visible track; drag to look around, scroll to zoom (binoculars); seat rows and a seated crowd around you on grandstand seats
+- Click a grandstand to sit in it (eye = tier + 1.2 m) or the ground to stand (eye-height slider); custom seats are computed in the browser with the same algorithm
+- URL parameters for sharing/screenshots: `?seat=turn1_grandstand&view=eye&yaw=-25&pitch=-12`
+
+Viewer data for the crop is ~1.9 MB in total (budget 15 MB).
+
+### Refreshing the fixtures (network, optional)
+
+```bash
+make fetch-obstructions   # Overpass mirrors with retries, falls back to the OSM API
+make fetch-imagery        # EOX Sentinel-2 cloudless WMTS tiles -> baked JPEG
+make viewer-data && make serve
+make screenshots          # with `make serve` running; uses headless Chrome
+```
+
+### Data attribution (Spike 3 additions)
+
+| Data | Source | License |
+|---|---|---|
+| Buildings, grandstands, woodland | © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors (via Overpass, fetched 2026-11-12) | ODbL 1.0 |
+| Imagery | [Sentinel-2 cloudless](https://s2maps.eu) by EOX IT Services GmbH (contains modified Copernicus Sentinel data 2016 & 2017) | CC BY 4.0 |
+
+The 2016 s2cloudless layer is used because it is CC BY 4.0 (attribution
+only); the later yearly layers are CC BY-NC-SA 4.0.
+
+---
+
 ## Spike 2: Grandstand View Analysis
 
 Building on Spike 1, this spike answers: **can the "arena" feeling of a circuit be turned into a number?**
@@ -22,7 +120,7 @@ The Red Bull Ring is known for its excellent spectator sightlines—you can see 
 - **Terrain Focus**: Camera framed on track; terrain cropped to ~400m margin
 - **CLI Viewshed**: `make viewshed SEAT=lat,lon` computes visibility from command line
 
-### Visibility Results
+### Visibility Results (Spike 2: bare terrain, original seat positions, eye 10 m above ground)
 
 | Position | Visible % | Sees Start/Finish | Visible Corners |
 |----------|-----------|-------------------|-----------------|
@@ -142,16 +240,24 @@ track-lab/
 ├── data/
 │   ├── centrelines/      # GeoJSON track centerlines (committed)
 │   ├── fixtures/         # Test fixture DEM crop (committed, ~30KB)
+│   ├── obstructions/     # OSM buildings/grandstands/woods fixture (committed, ~170KB)
+│   ├── imagery/          # Baked Sentinel-2 cloudless texture (committed, ~270KB)
 │   └── analysis.json     # Generated analysis output
 ├── cache/                # Downloaded DEM tiles (gitignored)
 ├── docs/                 # Screenshots and documentation assets
 ├── viewer/
 │   ├── index.html        # 3D viewer (Three.js)
+│   ├── viewshed.js       # Browser line-of-sight (port of surface_model.py)
 │   └── data/             # Generated terrain/track JSON (gitignored)
 ├── scripts/
 │   ├── fetch_dem.py      # Download Copernicus DEM tiles
 │   ├── analyze_track.py  # Compute track statistics
 │   ├── compute_viewshed.py # Line-of-sight visibility calculation
+│   ├── surface_model.py  # DEM + obstruction raster, shared LOS sampler
+│   ├── fetch_obstructions.py # OSM buildings/grandstands/woods -> GeoJSON fixture
+│   ├── fetch_imagery.py  # Bake Sentinel-2 cloudless texture
+│   ├── js_viewshed.mjs   # Runs viewer/viewshed.js under Node for verify
+│   ├── screenshot.sh     # Headless Chrome screenshots
 │   ├── export_viewer_data.py
 │   ├── serve.py          # Simple HTTP server
 │   └── verify.py         # Offline verification tests
