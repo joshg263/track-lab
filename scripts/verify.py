@@ -220,12 +220,10 @@ def test_viewshed(fixture_dem: Path, analysis: dict) -> bool:
     b. Main grandstand scores higher than a poor position (NE corner)
     c. Position behind high ground sees less
     d. Results are deterministic on repeated runs
-    """
-    centreline_path = PROJECT_DIR / "data" / "centrelines" / "red_bull_ring.geojson"
     
-    with open(centreline_path) as f:
-        gj = json.load(f)
-    coords = gj["features"][0]["geometry"]["coordinates"]
+    Uses the interpolated centreline from analysis (same as viewer) for consistent results.
+    """
+    coords = analysis["profile"]["coords"]
     corners = analysis.get("corners", [])
     
     all_ok = True

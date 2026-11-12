@@ -8,27 +8,30 @@ Building on Spike 1, this spike answers: **can the "arena" feeling of a circuit 
 
 The Red Bull Ring is known for its excellent spectator sightlines—you can see much of the lap from any grandstand thanks to the natural bowl-shaped terrain. This spike quantifies that by computing line-of-sight visibility from any seat position over the DEM.
 
-![Grandstand View Screenshot](docs/viewshed_screenshot.png)
+| Default View | Eye View |
+|:---:|:---:|
+| ![Default View](docs/viewer_default.png) | ![Eye View](docs/viewer_eyeview.png) |
 
 ### Key Features
 
-- **Track Ribbon**: The track is now rendered as a proper ~12m wide ribbon draped on terrain (no more z-fighting)
-- **Visibility Highlighting**: Track sections are colored by visibility—cyan for visible, red for hidden
-- **Interactive Seat Placement**: Click anywhere on the terrain to place a spectator seat
-- **Preset Grandstands**: Main Grandstand and Turn 1 Grandstand positions with precomputed visibility
-- **Eye View Camera**: Jump to see the track from the spectator's eye level
+- **Track Ribbon**: 14m wide ribbon draped on terrain with dark outline for contrast
+- **Visibility Highlighting**: Bright cyan for visible sections, red for hidden
+- **Corner Labels**: Numbered T1–T11 labels plus checkered start/finish line
+- **2D Minimap**: Bottom-right inset showing full lap with visibility coloring
+- **Eye View Camera**: Animated transition to spectator perspective
+- **Terrain Focus**: Camera framed on track; terrain cropped to ~400m margin
 - **CLI Viewshed**: `make viewshed SEAT=lat,lon` computes visibility from command line
 
 ### Visibility Results
 
 | Position | Visible % | Sees Start/Finish | Visible Corners |
 |----------|-----------|-------------------|-----------------|
-| Main Grandstand | 84.2% | ✓ Yes | 10/11 |
-| Turn 1 Grandstand | 84.2% | ✓ Yes | 10/11 |
-| NE Corner (poor) | 2.5% | ✗ No | 0/11 |
-| North Hills | 68.2% | ✓ Yes | 8/11 |
+| Main Grandstand | 87.9% | ✓ Yes | 10/11 |
+| Turn 1 Grandstand | 90.4% | ✓ Yes | 10/11 |
+| NE Corner (poor) | 5.6% | ✗ No | 1/11 |
+| North Hills | 82.1% | ✓ Yes | 10/11 |
 
-The main grandstand at the Red Bull Ring can see **84% of the track** including the start/finish straight and 10 of 11 corners—confirming the "arena" reputation is real and measurable.
+The main grandstand at the Red Bull Ring can see **88% of the track** including the start/finish straight and 10 of 11 corners—confirming the "arena" reputation is real and measurable.
 
 ### Viewshed CLI
 
@@ -48,8 +51,6 @@ make viewshed
 ## Spike 1: Terrain + Centreline
 
 This spike fetches real elevation data for the **Red Bull Ring** (Spielberg, Austria) and drapes the circuit centreline over it, displaying both in an interactive 3D viewer.
-
-![3D Viewer Screenshot](docs/viewer_screenshot.png)
 
 ### Quick Start
 
