@@ -18,7 +18,7 @@ DEM_TILE = cache/dem/Copernicus_DSM_COG_10_N47_00_E014_00_DEM.tif
 ANALYSIS_JSON = data/analysis.json
 VIEWER_DATA = viewer/data/terrain.json viewer/data/track.json
 
-.PHONY: all setup fetch-dem analyze viewer-data serve verify clean help
+.PHONY: all setup fetch-dem analyze viewer-data serve verify viewshed clean help
 
 all: fetch-dem analyze viewer-data
 	@echo ""
@@ -34,6 +34,7 @@ help:
 	@echo "  viewer-data - Export data for 3D viewer"
 	@echo "  serve       - Start local server at http://localhost:8000"
 	@echo "  verify      - Run offline verification tests"
+	@echo "  viewshed    - Compute viewshed (usage: make viewshed SEAT=lat,lon)"
 	@echo "  stats       - Print track statistics (CLI)"
 	@echo "  clean       - Remove generated files"
 
@@ -81,6 +82,23 @@ verify:
 	@$(PYTHON) scripts/verify.py
 	@echo ""
 	@echo "All checks passed!"
+
+# Viewshed calculation from command line
+# Usage: make viewshed SEAT=lat,lon
+#   or:  make viewshed SEAT=main_grandstand
+viewshed: $(ANALYSIS_JSON)
+	@if [ -z "$(SEAT)" ]; then \
+		echo "Usage: make viewshed SEAT=lat,lon"; \
+		echo "   or: make viewshed SEAT=main_grandstand"; \
+		echo ""; \
+		$(PYTHON) scripts/compute_viewshed.py --list-presets; \
+	else \
+		$(PYTHON) scripts/compute_viewshed.py \
+			--dem $(DEM_TILE) \
+			--centreline $(CENTRELINE) \
+			--seat "$(SEAT)" \
+			--analysis $(ANALYSIS_JSON); \
+	fi
 
 clean:
 	rm -f $(ANALYSIS_JSON)
