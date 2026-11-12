@@ -29,6 +29,8 @@ from typing import Optional
 import numpy as np
 import rasterio
 
+from corner_detection import analyze_corners_xy
+
 SITE_DIR = Path(__file__).parent.parent / "data" / "sites" / "nishiwaki_basin"
 LAYOUTS_DIR = SITE_DIR / "layouts"
 
@@ -230,41 +232,6 @@ def interpolate_layout(layout: dict, dem: np.ndarray, transform,
     return points, distances
 
 
-def compute_curvature(points: np.ndarray) -> np.ndarray:
-    """Compute signed curvature at each point. Returns array of radius values."""
-    n = len(points)
-    radii = np.zeros(n)
-    
-    for i in range(n):
-        p0 = points[(i - 2) % n, :2]
-        p1 = points[(i - 1) % n, :2]
-        p2 = points[i, :2]
-        p3 = points[(i + 1) % n, :2]
-        p4 = points[(i + 2) % n, :2]
-        
-        v1 = p2 - p0
-        v2 = p4 - p2
-        
-        cross = v1[0] * v2[1] - v1[1] * v2[0]
-        
-        d1 = np.linalg.norm(v1)
-        d2 = np.linalg.norm(v2)
-        
-        if d1 > 0.1 and d2 > 0.1:
-            sin_angle = cross / (d1 * d2 + 1e-10)
-            sin_angle = np.clip(sin_angle, -1, 1)
-            
-            arc_length = (d1 + d2) / 2
-            if abs(sin_angle) > 1e-6:
-                radii[i] = abs(arc_length / (2 * sin_angle))
-            else:
-                radii[i] = 1e6
-        else:
-            radii[i] = 1e6
-    
-    return radii
-
-
 def compute_gradients(points: np.ndarray, distances: np.ndarray, 
                       window_m: float = 20) -> np.ndarray:
     """Compute longitudinal gradient at each point using a rolling window."""
@@ -402,43 +369,6 @@ def estimate_cut_fill(points: np.ndarray, track_width: float,
     }
 
 
-def find_corners(radii: np.ndarray, distances: np.ndarray, 
-                 threshold_m: float = 200) -> list[dict]:
-    """Find corners (sections with small radius)."""
-    corners = []
-    in_corner = False
-    corner_start = 0
-    
-    for i, r in enumerate(radii):
-        if r < threshold_m and not in_corner:
-            in_corner = True
-            corner_start = i
-        elif r >= threshold_m and in_corner:
-            in_corner = False
-            corner_indices = list(range(corner_start, i))
-            if corner_indices:
-                min_r = min(radii[corner_indices])
-                mid_idx = corner_indices[len(corner_indices) // 2]
-                corners.append({
-                    "index": mid_idx,
-                    "radius_m": float(min_r),
-                    "distance_m": float(distances[mid_idx]),
-                })
-    
-    if in_corner:
-        corner_indices = list(range(corner_start, len(radii)))
-        if corner_indices:
-            min_r = min(radii[corner_indices])
-            mid_idx = corner_indices[len(corner_indices) // 2]
-            corners.append({
-                "index": mid_idx,
-                "radius_m": float(min_r),
-                "distance_m": float(distances[mid_idx]),
-            })
-    
-    return corners
-
-
 def find_straights(radii: np.ndarray, distances: np.ndarray, 
                    threshold_m: float = 500) -> list[dict]:
     """Find straight sections."""
@@ -545,11 +475,14 @@ def check_layout(layout_path: Path, site_dir: Path = SITE_DIR) -> LayoutReport:
     
     lap_length = distances[-1] + np.linalg.norm(points[0, :2] - points[-1, :2])
     
-    radii = compute_curvature(points)
-    min_radius = np.min(radii[radii < 1e5])
-    
-    corners = find_corners(radii, distances)
-    num_corners = len(corners)
+    corner_analysis = analyze_corners_xy(points[:, :2], distances, closed=True)
+    radii = corner_analysis["radius"]
+    corner_distances = corner_analysis["distances"]
+    corners = corner_analysis["corners_dict"]
+    num_corners = corner_analysis["corner_count"]
+    min_radius = corner_analysis["min_radius_m"]
+    if min_radius is None:
+        raise ValueError("Could not compute minimum corner radius")
     
     gradients = compute_gradients(points, distances)
     max_gradient = np.max(np.abs(gradients))
@@ -563,7 +496,7 @@ def check_layout(layout_path: Path, site_dir: Path = SITE_DIR) -> LayoutReport:
     
     cut_fill = estimate_cut_fill(points, track_width)
     
-    straights = find_straights(radii, distances)
+    straights = find_straights(radii, corner_distances)
     longest_straight = max([s["length_m"] for s in straights]) if straights else 0
     
     viewshed_pct = compute_viewshed(points, dem, transform, site_info)
@@ -661,6 +594,7 @@ def check_layout(layout_path: Path, site_dir: Path = SITE_DIR) -> LayoutReport:
             "lap_length_m": round(lap_length, 0),
             "num_corners": num_corners,
             "min_radius_m": round(min_radius, 1),
+            "corners": corners,
             "max_gradient_pct": round(max_gradient, 1),
             "longest_straight_m": round(longest_straight, 0),
             "viewshed_pct": round(viewshed_pct, 1),
@@ -689,6 +623,26 @@ def print_report(report: LayoutReport, verbose: bool = False):
     print(f"\nSummary:")
     for key, value in report.summary.items():
         print(f"  {key}: {value}")
+
+
+def write_viewer_metrics(layout_paths: list[Path], reports: list[LayoutReport], site_dir: Path) -> Path:
+    """Write checker corner metrics for viewer/site.html (single source of truth)."""
+    metrics_dir = site_dir / "layouts"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    out_path = metrics_dir / "check_metrics.json"
+    payload = {}
+    for layout_path, report in zip(layout_paths, reports):
+        s = report.summary
+        payload[layout_path.stem] = {
+            "layout_name": report.layout_name,
+            "num_corners": s["num_corners"],
+            "min_radius_m": s["min_radius_m"],
+            "corners": s.get("corners", []),
+        }
+    with open(out_path, "w") as f:
+        json.dump(payload, f, indent=2)
+        f.write("\n")
+    return out_path
 
 
 def print_summary_table(reports: list[LayoutReport]):
@@ -731,11 +685,16 @@ def main():
     parser.add_argument("--json", action="store_true", help="Output as JSON")
     parser.add_argument("--site-dir", type=Path, default=SITE_DIR, help="Site directory")
     parser.add_argument("--quiet", "-q", action="store_true", help="Only print summary table")
+    parser.add_argument(
+        "--write-viewer-metrics",
+        action="store_true",
+        help="Write layouts/check_metrics.json for viewer/site.html",
+    )
     args = parser.parse_args()
     
     if args.all:
         layout_files = sorted(LAYOUTS_DIR.glob("*.json"))
-        layout_files = [f for f in layout_files if f.name != "README.md"]
+        layout_files = [f for f in layout_files if f.name not in ("README.md", "check_metrics.json")]
         
         if not layout_files:
             print(f"No layout files found in {LAYOUTS_DIR}")
@@ -747,10 +706,12 @@ def main():
         return 1
     
     reports = []
+    checked_paths = []
     for layout_path in layout_files:
         try:
             report = check_layout(layout_path, args.site_dir)
             reports.append(report)
+            checked_paths.append(layout_path)
             if not args.quiet:
                 print_report(report)
         except Exception as e:
@@ -758,6 +719,11 @@ def main():
             import traceback
             traceback.print_exc()
     
+    if reports and (args.all or args.write_viewer_metrics):
+        metrics_path = write_viewer_metrics(checked_paths, reports, args.site_dir)
+        if not args.quiet:
+            print(f"\nViewer metrics written to {metrics_path}")
+
     if len(reports) > 1 or args.quiet:
         print_summary_table(reports)
     

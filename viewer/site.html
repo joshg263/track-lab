@@ -215,7 +215,9 @@
         let sitesIndex = [];
         let currentSite = null;
         let currentLayout = null;
+        let currentLayoutKey = null;
         let layoutPoints = null;
+        let layoutCheckMetrics = null;
         let cornerLabels = [];
         let atViewpoint = false;
 
@@ -256,13 +258,40 @@
             }
         }
 
+        function checkerLayoutMetrics(layoutKey) {
+            if (!layoutKey || !layoutCheckMetrics) return null;
+            return layoutCheckMetrics[layoutKey] || null;
+        }
+
+        function nearestLayoutPointAtDistance(distanceM) {
+            if (!layoutPoints?.length) return null;
+            let best = layoutPoints[0];
+            let bestD = Math.abs(best.distance - distanceM);
+            for (const p of layoutPoints) {
+                const d = Math.abs(p.distance - distanceM);
+                if (d < bestD) {
+                    bestD = d;
+                    best = p;
+                }
+            }
+            return best;
+        }
+
         async function loadLayoutsIndex(slug) {
             const select = document.getElementById('layout-select');
             select.innerHTML = '<option value="">None</option>';
+            layoutCheckMetrics = null;
             
             if (!slug) return [];
             
             try {
+                try {
+                    const metricsRes = await fetch(`${SITES_BASE}/${slug}/layouts/check_metrics.json`);
+                    if (metricsRes.ok) {
+                        layoutCheckMetrics = await metricsRes.json();
+                    }
+                } catch (e) { /* metrics optional until layout_check runs */ }
+
                 const layoutFiles = ['layout_a_straight_hairpin', 'layout_b_elevation_sweep', 'layout_c_arena'];
                 const layouts = [];
                 
@@ -363,6 +392,7 @@
                 const res = await fetch(`${SITES_BASE}/${currentSite.slug}/layouts/${name}.json`);
                 if (!res.ok) throw new Error(`Layout not found: ${name}`);
                 
+                currentLayoutKey = name;
                 currentLayout = await res.json();
                 layoutPoints = interpolateLayout(currentLayout);
                 
@@ -380,6 +410,7 @@
 
         function clearLayout() {
             currentLayout = null;
+            currentLayoutKey = null;
             layoutPoints = null;
             
             if (trackGroup) {
@@ -611,60 +642,6 @@
             trackGroup.add(sfLine);
         }
 
-        function findCorners() {
-            if (!layoutPoints || layoutPoints.length < 10) return [];
-            
-            const corners = [];
-            const n = layoutPoints.length;
-            
-            for (let i = 0; i < n; i++) {
-                const p0 = layoutPoints[(i - 5 + n) % n];
-                const p1 = layoutPoints[i];
-                const p2 = layoutPoints[(i + 5) % n];
-                
-                const v1x = p1.x - p0.x, v1y = p1.y - p0.y;
-                const v2x = p2.x - p1.x, v2y = p2.y - p1.y;
-                
-                const d1 = Math.sqrt(v1x*v1x + v1y*v1y) || 1;
-                const d2 = Math.sqrt(v2x*v2x + v2y*v2y) || 1;
-                
-                const cross = (v1x * v2y - v1y * v2x) / (d1 * d2);
-                const sinAngle = Math.abs(cross);
-                
-                if (sinAngle > 0.1) {
-                    const arcLength = (d1 + d2) / 2;
-                    const radius = arcLength / (2 * sinAngle);
-                    layoutPoints[i].radius = radius;
-                }
-            }
-            
-            let inCorner = false;
-            let cornerStart = 0;
-            const threshold = 200;
-            
-            for (let i = 0; i < n; i++) {
-                const r = layoutPoints[i].radius || 1e6;
-                if (r < threshold && !inCorner) {
-                    inCorner = true;
-                    cornerStart = i;
-                } else if (r >= threshold && inCorner) {
-                    inCorner = false;
-                    const mid = Math.floor((cornerStart + i) / 2);
-                    const minR = Math.min(...layoutPoints.slice(cornerStart, i).map(p => p.radius || 1e6));
-                    corners.push({
-                        index: mid,
-                        radius: minR,
-                        distance: layoutPoints[mid].distance,
-                        x: layoutPoints[mid].x,
-                        y: layoutPoints[mid].y,
-                        z: layoutPoints[mid].z,
-                    });
-                }
-            }
-            
-            return corners;
-        }
-
         function buildCornerLabels() {
             cornerLabels.forEach(l => { if (l.parent) l.parent.remove(l); });
             cornerLabels = [];
@@ -682,13 +659,16 @@
             world.add(sfObj);
             cornerLabels.push(sfObj);
             
-            const corners = findCorners();
+            const checker = checkerLayoutMetrics(currentLayoutKey);
+            const corners = checker?.corners || [];
             corners.forEach((corner, idx) => {
+                const pt = nearestLayoutPointAtDistance(corner.position_m);
+                if (!pt) return;
                 const label = document.createElement('div');
                 label.className = 'corner-label';
                 label.textContent = `T${idx + 1}`;
                 const labelObj = new CSS2DObject(label);
-                labelObj.position.set(corner.x, corner.z - baseElevation + lift, -corner.y);
+                labelObj.position.set(pt.x, pt.z - baseElevation + lift, -pt.y);
                 world.add(labelObj);
                 cornerLabels.push(labelObj);
             });
@@ -710,10 +690,9 @@
             const elevs = layoutPoints.map(p => p.z);
             const elevRange = Math.max(...elevs) - Math.min(...elevs);
             
-            const corners = findCorners();
-            const minRadius = corners.length > 0 
-                ? Math.min(...corners.map(c => c.radius))
-                : 999;
+            const checker = checkerLayoutMetrics(currentLayoutKey);
+            const numCorners = checker?.num_corners;
+            const minRadius = checker?.min_radius_m;
             
             let maxGrad = 0;
             for (let i = 1; i < n; i++) {
@@ -728,9 +707,9 @@
             const checks = [
                 { name: 'Lap length', value: `${(lapLength/1000).toFixed(2)} km`, 
                   pass: lapLength >= 3500 && lapLength <= 4500, target: '3.5-4.5 km' },
-                { name: 'Min radius', value: `${minRadius.toFixed(0)} m`, 
-                  pass: minRadius >= 15, target: '≥15 m' },
-                { name: 'Corners', value: corners.length, pass: true, target: 'info' },
+                { name: 'Min radius', value: minRadius != null ? `${Number(minRadius).toFixed(1)} m` : '—', 
+                  pass: minRadius != null && minRadius >= 15, target: '≥15 m' },
+                { name: 'Corners', value: numCorners != null ? numCorners : '—', pass: true, target: 'info' },
                 { name: 'Max gradient', value: `${maxGrad.toFixed(1)}%`, 
                   pass: maxGrad <= 12, target: '≤12%' },
                 { name: 'Elev range', value: `${elevRange.toFixed(0)} m`, 
