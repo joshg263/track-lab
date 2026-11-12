@@ -1,0 +1,21 @@
+{
+  "name": "layout_c_arena",
+  "direction": "An arena layout that keeps as much of the lap as possible visible from the best rim viewpoint",
+  "version": 1,
+  "track_width_m": 14,
+  "coordinate_system": "local_m",
+  "control_points": [
+    {"x": -500, "y": -300, "note": "S/F - visible from SW viewpoint"},
+    {"x": -600, "y": 100, "note": "West straight"},
+    {"x": -600, "y": 450, "note": "Approaching north"},
+    {"x": -400, "y": 700, "note": "Turn 1 - north entry"},
+    {"x": -100, "y": 800, "note": "North sweeper"},
+    {"x": 200, "y": 800, "note": "North apex"},
+    {"x": 400, "y": 750, "note": "Turn 2 - north edge"},
+    {"x": 500, "y": -280, "note": "East section - crosses obstacle"},
+    {"x": 350, "y": -400, "note": "Turn 3 - south flat"},
+    {"x": 50, "y": -420, "note": "South section"},
+    {"x": -300, "y": -350, "note": "Final turn - SW"}
+  ],
+  "notes": "Compact arena layout for visibility. WARNING: East section crosses central high ground - cannot meet 12% gradient limit without major earthwork."
+}

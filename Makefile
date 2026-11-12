@@ -160,3 +160,35 @@ site-scout-verify:
 site-scout-screenshots:
 	@echo "Taking screenshots of Japan sites..."
 	scripts/site_screenshot.sh
+
+# ============================================================
+# AI Direction Loop (Spike 5)
+# ============================================================
+
+.PHONY: layout-check layout-check-all layout-verify direction-loop-verify
+
+# Check a single layout
+# Usage: make layout-check LAYOUT=data/sites/nishiwaki_basin/layouts/layout_a.json
+layout-check:
+	@if [ -z "$(LAYOUT)" ]; then \
+		echo "Usage: make layout-check LAYOUT=path/to/layout.json"; \
+	else \
+		$(PYTHON) scripts/layout_check.py $(LAYOUT); \
+	fi
+
+# Check all Nishiwaki Basin layouts and print summary table
+layout-check-all:
+	@echo "Checking all Nishiwaki Basin layouts..."
+	@$(PYTHON) scripts/layout_check.py --all
+
+# Full direction loop verification
+direction-loop-verify:
+	@echo "=== Direction Loop Verification ==="
+	@echo ""
+	@echo "1. Checking all committed layouts..."
+	@$(PYTHON) scripts/layout_check.py --all --quiet
+	@echo ""
+	@echo "2. Testing bad layout rejection..."
+	@$(PYTHON) scripts/verify_direction_loop.py
+	@echo ""
+	@echo "All direction loop checks passed!"

@@ -8,28 +8,31 @@
     "name": "Nishiwaki",
     "distance_m": 2769
   },
-  "why_it_fits": "Natural bowl with 2.4km floor diameter, 127m relief (within 50-150m target), rim slopes 7-33\u00b0 over 350m contiguous stretch. Best rim viewpoint sees 57.5% of floor vs 16.8% mean from floor points.",
+  "why_it_fits": "Natural bowl with 2181m floor diameter (circular-equiv), 3344m \u00d7 2837m floor bbox, 144m relief, rim slopes 23\u00b0-34\u00b0. Best viewpoint sees 70.3% of floor.",
   "metrics": {
-    "floor_elev_m": 76.3,
-    "rim_elev_m": 193.3,
-    "relief_m": 117.0,
-    "diameter_m": 1763.0,
-    "floor_flat_pct": 51.6,
+    "floor_elev_m": 88.8,
+    "rim_elev_m": 233.1,
+    "relief_m": 144.3,
+    "diameter_m": 2181.0,
+    "floor_bbox_m": [
+      3344.0,
+      2837.0
+    ],
+    "floor_flat_pct": 38.6,
     "rim_slope_range": [
-      20.5,
-      32.5
+      22.7,
+      33.9
     ],
     "best_viewpoint": {
-      "lat": 34.99125,
-      "lon": 135.00958,
-      "visibility_pct": 63.6,
-      "elevation_m": 183.4,
-      "row": 32,
-      "col": 35
+      "lat": 34.98347,
+      "lon": 135.00319,
+      "visibility_pct": 70.3,
+      "elevation_m": 222.6,
+      "row": 60,
+      "col": 12
     },
-    "floor_center_visibility_pct": 9.0,
-    "dem_rows": 88,
-    "dem_cols": 92,
+    "dem_rows": 112,
+    "dem_cols": 135,
     "cell_size_m": 25.33
   },
   "files": {
