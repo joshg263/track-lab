@@ -20,7 +20,7 @@ from pyproj import Geod
 from scipy.ndimage import gaussian_filter1d
 
 
-def load_centreline(geojson_path: str, target_spacing_m: float = 10.0) -> np.ndarray:
+def load_centreline(geojson_path: str, target_spacing_m: float = 5.0) -> np.ndarray:
     """
     Load centreline coordinates from GeoJSON and interpolate to target spacing.
     Returns Nx2 array of [lon, lat].
@@ -144,10 +144,13 @@ def compute_gradients(distances: np.ndarray, elevations: np.ndarray,
     return gradients
 
 
-def compute_curvature(coords: np.ndarray, distances: np.ndarray) -> np.ndarray:
+def compute_curvature(coords: np.ndarray, distances: np.ndarray, 
+                      half_window_m: float = 20.0) -> np.ndarray:
     """
-    Compute curvature (1/radius in 1/m) at each point.
-    Uses local coordinate projection for accuracy.
+    Compute curvature (1/radius in 1/m) at each point using arc-length windowing.
+    
+    Uses three-point radius calculation over a fixed arc-length window of ±half_window_m.
+    This is more stable than point-by-point derivatives for noisy or densely sampled polylines.
     """
     n = len(coords)
     
@@ -159,43 +162,109 @@ def compute_curvature(coords: np.ndarray, distances: np.ndarray) -> np.ndarray:
     x = (coords[:, 0] - center_lon) * lon_scale
     y = (coords[:, 1] - center_lat) * lat_scale
     
-    sigma = 3
-    x_smooth = gaussian_filter1d(x, sigma, mode='wrap')
-    y_smooth = gaussian_filter1d(y, sigma, mode='wrap')
+    curvature = np.zeros(n)
     
-    dx = np.gradient(x_smooth)
-    dy = np.gradient(y_smooth)
-    ddx = np.gradient(dx)
-    ddy = np.gradient(dy)
-    
-    denom = (dx**2 + dy**2)**1.5
-    denom[denom < 1e-10] = 1e-10
-    curvature = np.abs(dx * ddy - dy * ddx) / denom
+    for i in range(n):
+        d_i = distances[i]
+        d_back = d_i - half_window_m
+        d_fwd = d_i + half_window_m
+        
+        i_back = np.searchsorted(distances, d_back, side='left')
+        i_fwd = np.searchsorted(distances, d_fwd, side='right') - 1
+        
+        i_back = max(0, i_back)
+        i_fwd = min(n - 1, i_fwd)
+        
+        if i_fwd <= i_back or i == i_back or i == i_fwd:
+            curvature[i] = 0.0
+            continue
+        
+        x1, y1 = x[i_back], y[i_back]
+        x2, y2 = x[i], y[i]
+        x3, y3 = x[i_fwd], y[i_fwd]
+        
+        a = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+        b = np.sqrt((x3 - x2)**2 + (y3 - y2)**2)
+        c = np.sqrt((x3 - x1)**2 + (y3 - y1)**2)
+        
+        if a < 1e-6 or b < 1e-6 or c < 1e-6:
+            curvature[i] = 0.0
+            continue
+        
+        s = (a + b + c) / 2
+        area_sq = s * (s - a) * (s - b) * (s - c)
+        
+        if area_sq <= 0:
+            curvature[i] = 0.0
+        else:
+            area = np.sqrt(area_sq)
+            radius = (a * b * c) / (4 * area)
+            curvature[i] = 1.0 / radius if radius > 1e-6 else 0.0
     
     return curvature
 
 
 def find_corners(curvature: np.ndarray, distances: np.ndarray, 
-                 min_radius_m: float = 500, min_separation_m: float = 50) -> list:
+                 radius_threshold_m: float = 175.0, merge_gap_m: float = 30.0,
+                 min_run_length_m: float = 20.0) -> list:
     """
-    Find local curvature maxima (tight corners).
-    Returns list of (distance_m, radius_m).
+    Find corners as contiguous runs where radius is below threshold.
+    
+    A corner is a contiguous run where radius < radius_threshold_m (~175m, midpoint of 150-200m).
+    Runs separated by < merge_gap_m are merged. Runs shorter than min_run_length_m are dropped.
+    Returns list of (distance_m, radius_m) where distance is the center of the run
+    and radius is the minimum radius within that run.
     """
+    n = len(curvature)
+    with np.errstate(divide='ignore'):
+        radius = np.where(curvature > 1e-10, 1.0 / curvature, np.inf)
+    
+    runs = []
+    in_run = False
+    run_start = 0
+    
+    for i in range(n):
+        if radius[i] < radius_threshold_m:
+            if not in_run:
+                in_run = True
+                run_start = i
+        else:
+            if in_run:
+                runs.append((run_start, i - 1))
+                in_run = False
+    
+    if in_run:
+        runs.append((run_start, n - 1))
+    
+    if not runs:
+        return []
+    
+    merged = [runs[0]]
+    for start, end in runs[1:]:
+        prev_start, prev_end = merged[-1]
+        gap = distances[start] - distances[prev_end]
+        if gap < merge_gap_m:
+            merged[-1] = (prev_start, end)
+        else:
+            merged.append((start, end))
+    
     corners = []
-    radius = 1.0 / (curvature + 1e-10)
-    
-    for i in range(1, len(curvature) - 1):
-        if radius[i] > min_radius_m:
+    for start, end in merged:
+        run_length = distances[end] - distances[start]
+        if run_length < min_run_length_m:
             continue
-        if curvature[i] > curvature[i-1] and curvature[i] > curvature[i+1]:
-            if corners and (distances[i] - corners[-1][0]) < min_separation_m:
-                if radius[i] < corners[-1][1]:
-                    corners[-1] = (distances[i], radius[i])
-            else:
-                corners.append((distances[i], radius[i]))
+        
+        run_radii = radius[start:end+1]
+        valid_radii = run_radii[run_radii < np.inf]
+        if len(valid_radii) == 0:
+            continue
+        
+        min_radius = float(np.min(valid_radii))
+        center_dist = (distances[start] + distances[end]) / 2
+        corners.append((center_dist, min_radius))
     
-    corners.sort(key=lambda x: x[1])
-    return corners[:15]
+    corners.sort(key=lambda x: x[0])
+    return corners
 
 
 def smooth_elevations(elevations: np.ndarray, sigma: float = 2.0) -> np.ndarray:
@@ -238,6 +307,9 @@ def analyze(geojson_path: str, dem_paths: list, smooth_sigma: float = 2.0) -> di
     deltas = np.abs(np.diff(elevations))
     total_elevation_change = np.sum(deltas)
     
+    corner_radii = [r for _, r in corners]
+    min_corner_radius = min(corner_radii) if corner_radii else None
+    
     results = {
         "centreline_file": str(geojson_path),
         "num_points": len(coords),
@@ -251,6 +323,8 @@ def analyze(geojson_path: str, dem_paths: list, smooth_sigma: float = 2.0) -> di
         "max_downhill_gradient_pct": round(float(gradients[max_down_idx]), 2),
         "max_downhill_position_m": round(float(distances[max_down_idx]), 1),
         "smoothing_sigma": smooth_sigma,
+        "corner_count": len(corners),
+        "min_corner_radius_m": round(min_corner_radius, 1) if min_corner_radius else None,
         "corners": [
             {"position_m": round(d, 1), "radius_m": round(r, 1)}
             for d, r in corners
@@ -282,11 +356,21 @@ def print_results(results: dict):
     print(f"\nSteepest uphill:   {results['max_uphill_gradient_pct']:+.2f}% at {results['max_uphill_position_m']:.0f}m")
     print(f"Steepest downhill: {results['max_downhill_gradient_pct']:+.2f}% at {results['max_downhill_position_m']:.0f}m")
     
-    print(f"\nTightest corners (sorted by radius):")
-    for i, corner in enumerate(results['corners'][:10], 1):
-        print(f"  {i:2d}. R={corner['radius_m']:6.1f}m at {corner['position_m']:.0f}m")
+    corner_count = results['corner_count']
+    min_radius = results['min_corner_radius_m']
+    print(f"\nCorners:          {corner_count} (radius threshold: 175m)")
+    if min_radius is not None:
+        print(f"Min corner radius: {min_radius:.1f}m")
+    else:
+        print(f"Min corner radius: N/A (no corners found)")
     
-    print(f"\nNote: Gradients computed with 50m rolling window.")
+    if results['corners']:
+        print(f"\nCorner details (by position):")
+        for i, corner in enumerate(results['corners'][:10], 1):
+            print(f"  {i:2d}. R={corner['radius_m']:6.1f}m at {corner['position_m']:.0f}m")
+    
+    print(f"\nNote: Curvature computed with ±20m arc-length window.")
+    print(f"      Corners: contiguous runs with R<175m, merged if gap<30m, dropped if <20m.")
     print(f"      Elevations smoothed with σ={results['smoothing_sigma']} to reduce DEM noise.")
     print("=" * 60)
 
