@@ -8,15 +8,23 @@ Runs offline-safe checks using a committed DEM fixture:
 3. Calibration against published Red Bull Ring figures
 4. Viewshed calculation tests (Spike 2)
 5. Ribbon continuity test (Spike 2 v2)
+6. Obstructions: OSM buildings, grandstands and canopy lower visibility (Spike 3)
+7. JS viewer viewshed agrees with Python on every preset (Spike 3, needs node)
 
 The fixture DEM (data/fixtures/red_bull_ring_dem.tif) is a cropped region
-of the full Copernicus tile, small enough to commit (~30KB).
+of the full Copernicus tile, small enough to commit (~30KB). Obstructions come
+from the committed OSM fixture (data/obstructions/red_bull_ring_osm.geojson).
 """
 
+import contextlib
+import hashlib
+import io
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -26,9 +34,10 @@ PROJECT_DIR = SCRIPT_DIR.parent
 
 sys.path.insert(0, str(SCRIPT_DIR))
 from compute_viewshed import (
-    PRESET_SEATS, POOR_VISIBILITY_SEAT, compute_viewshed, 
-    check_start_finish_visible, find_visible_corners
+    BEHIND_BUILDING_SEAT, IN_WOOD_SEAT, compute_viewshed, check_start_finish_visible,
+    find_visible_corners, preset_seats,
 )
+from surface_model import DEFAULT_OBSTRUCTIONS, LOS_SAMPLES, build_obstructions
 
 # Official figures from FIA Media Kit for 2026 Austrian Grand Prix
 # Source: https://www.fia.com/sites/default/files/media_kit_-_2026_austrian_grand_prix.pdf
@@ -191,233 +200,197 @@ def test_calibration(analysis: dict) -> bool:
 
 def test_viewer_data():
     """Check viewer data files if they exist."""
-    terrain_path = PROJECT_DIR / "viewer" / "data" / "terrain.json"
-    track_path = PROJECT_DIR / "viewer" / "data" / "track.json"
-    
-    if not terrain_path.exists() or not track_path.exists():
+    data = PROJECT_DIR / "viewer" / "data"
+    needed = ["terrain.json", "terrain.bin", "track.json", "scene.json", "obstructions.bin", "imagery.jpg"]
+    if not all((data / f).exists() for f in needed):
         print("- Viewer data not generated (run 'make viewer-data')")
         return True
-    
-    with open(terrain_path) as f:
+
+    with open(data / "terrain.json") as f:
         terrain = json.load(f)
-    
-    assert "heights" in terrain, "Terrain missing heights"
-    assert len(terrain["heights"]) > 10, "Terrain grid too small"
-    
-    with open(track_path) as f:
+    n = terrain["rows"] * terrain["cols"]
+    assert (data / "terrain.bin").stat().st_size == n * 4, "terrain.bin size mismatch"
+    with open(data / "scene.json") as f:
+        scene = json.load(f)
+    o = scene["obstructions"]
+    assert (data / "obstructions.bin").stat().st_size == 3 * o["rows"] * o["cols"], "obstructions.bin size mismatch"
+    with open(data / "track.json") as f:
         track = json.load(f)
-    
-    assert "points" in track, "Track missing points"
     assert len(track["points"]) > 10, "Track has too few points"
-    
-    print(f"✓ Viewer data valid: terrain {terrain['grid']['rows']}x{terrain['grid']['cols']}, track {len(track['points'])} points")
-    return True
+
+    total_mb = sum(p.stat().st_size for p in data.iterdir()) / 1024 / 1024
+    ok = total_mb < 15
+    print(f"{'✓' if ok else '✗'} Viewer data valid: terrain {terrain['rows']}x{terrain['cols']}, "
+          f"{len(scene['buildings'])} buildings, {len(scene['grandstands'])} grandstands, "
+          f"{len(scene['trees']) // 3} trees, {total_mb:.1f} MB total (budget 15 MB)")
+    return ok
 
 
-def test_viewshed(fixture_dem: Path, analysis: dict) -> bool:
+def test_viewshed(fixture_dem: Path, analysis: dict, obs) -> bool:
     """
-    Test viewshed calculations (Spike 2 verification).
-    
+    Test viewshed calculations (Spike 2 verification, now over the surface model).
+
     Checks:
     a. Main grandstand sees the start/finish straight
     b. Main grandstand scores higher than a poor position (NE corner)
     c. Position behind high ground sees less
     d. Results are deterministic on repeated runs
-    
+
     Uses the interpolated centreline from analysis (same as viewer) for consistent results.
     """
     coords = analysis["profile"]["coords"]
     corners = analysis.get("corners", [])
-    
+    dem = str(fixture_dem)
     all_ok = True
-    
-    # Get main grandstand info
-    main_gs = PRESET_SEATS["main_grandstand"]
-    
-    # Test a: Main grandstand sees the start/finish straight
-    print("  Computing viewshed for main grandstand...")
-    main_result = compute_viewshed(
-        str(fixture_dem), coords, 
-        main_gs["lon"], main_gs["lat"],
-        main_gs["eye_height_m"]
-    )
+
+    main_gs = preset_seats(obs)["main_grandstand"]
+    main_result = compute_viewshed(dem, coords, main_gs["lon"], main_gs["lat"], main_gs["eye_height_m"], obs)
     main_visibility_pct = main_result["visible_pct"]
-    
+
     sf_visible = check_start_finish_visible(
-        main_result["visibility"], 
-        main_result["distances_m"],
-        main_result["total_length_m"]
+        main_result["visibility"], main_result["distances_m"], main_result["total_length_m"]
     )
-    
     status = "✓" if sf_visible else "✗"
     print(f"{status} Main grandstand sees start/finish: {'Yes' if sf_visible else 'No'}")
-    if not sf_visible:
-        all_ok = False
-    
-    # Test b: Main grandstand scores higher than a poor position
-    # Use NE corner (47.228, 14.770) which has very poor visibility
-    poor_lon, poor_lat = 14.770, 47.228
-    
-    print("  Computing viewshed for poor position (NE corner)...")
-    poor_result = compute_viewshed(
-        str(fixture_dem), coords,
-        poor_lon, poor_lat, 10.0
-    )
-    poor_visibility_pct = poor_result["visible_pct"]
-    
-    # Main grandstand should have at least 20% more visibility than poor position
-    visibility_margin = main_visibility_pct - poor_visibility_pct
+    all_ok &= sf_visible
+
+    poor_result = compute_viewshed(dem, coords, 14.770, 47.228, 10.0, obs)
+    visibility_margin = main_visibility_pct - poor_result["visible_pct"]
     margin_ok = visibility_margin >= 20
-    
-    status = "✓" if margin_ok else "✗"
-    print(f"{status} Main grandstand visibility advantage:")
+    print(f"{'✓' if margin_ok else '✗'} Main grandstand visibility advantage:")
     print(f"    Main grandstand: {main_visibility_pct:.1f}%")
-    print(f"    NE corner (poor): {poor_visibility_pct:.1f}%")
+    print(f"    NE corner (poor): {poor_result['visible_pct']:.1f}%")
     print(f"    Margin: {visibility_margin:.1f}% (required: ≥20%)")
-    if not margin_ok:
-        all_ok = False
-    
-    # Test c: Position behind high ground (north hills) sees less than main grandstand
-    north_lon, north_lat = 14.758, 47.230
-    
-    print("  Computing viewshed for position behind hills (north)...")
-    north_result = compute_viewshed(
-        str(fixture_dem), coords,
-        north_lon, north_lat, 10.0
-    )
-    north_visibility_pct = north_result["visible_pct"]
-    
-    # Main grandstand should have better visibility than north hills position
-    north_margin = main_visibility_pct - north_visibility_pct
+    all_ok &= margin_ok
+
+    north_result = compute_viewshed(dem, coords, 14.758, 47.230, 10.0, obs)
+    north_margin = main_visibility_pct - north_result["visible_pct"]
     north_ok = north_margin > 0
-    
-    status = "✓" if north_ok else "✗"
-    print(f"{status} Main grandstand better than north hills:")
+    print(f"{'✓' if north_ok else '✗'} Main grandstand better than north hills:")
     print(f"    Main grandstand: {main_visibility_pct:.1f}%")
-    print(f"    North hills: {north_visibility_pct:.1f}%")
+    print(f"    North hills: {north_result['visible_pct']:.1f}%")
     print(f"    Margin: {north_margin:.1f}%")
-    if not north_ok:
-        all_ok = False
-    
-    # Test d: Deterministic results
-    print("  Testing determinism (repeat computation)...")
-    main_result_2 = compute_viewshed(
-        str(fixture_dem), coords,
-        main_gs["lon"], main_gs["lat"],
-        main_gs["eye_height_m"]
-    )
-    
-    deterministic = (
-        main_result_2["visible_pct"] == main_result["visible_pct"] and
-        main_result_2["visibility"] == main_result["visibility"]
-    )
-    
-    status = "✓" if deterministic else "✗"
-    print(f"{status} Results deterministic: {'Yes' if deterministic else 'No'}")
-    if not deterministic:
-        print(f"    Run 1: {main_result['visible_pct']:.1f}%")
-        print(f"    Run 2: {main_result_2['visible_pct']:.1f}%")
-        all_ok = False
-    
-    # Report visible corners for main grandstand
+    all_ok &= north_ok
+
     if corners:
-        corners_vis = find_visible_corners(
-            main_result["visibility"],
-            main_result["distances_m"],
-            corners
-        )
+        corners_vis = find_visible_corners(main_result["visibility"], main_result["distances_m"], corners)
         visible_corners = [c for c in corners_vis if c["visible"]]
-        print(f"\n  Main grandstand sees {len(visible_corners)}/{len(corners)} corners:")
-        for c in visible_corners[:5]:
-            print(f"    R={c['radius_m']:.0f}m @ {c['position_m']:.0f}m")
-    
+        print(f"\n  Main grandstand sees {len(visible_corners)}/{len(corners)} corners")
+
     return all_ok
+
+
+def test_obstructions(fixture_dem: Path, analysis: dict, obs) -> bool:
+    """Obstructions lower visibility, and the whole pipeline is deterministic."""
+    coords = analysis["profile"]["coords"]
+    dem = str(fixture_dem)
+    all_ok = True
+
+    with open(DEFAULT_OBSTRUCTIONS) as f:
+        counts = json.load(f)["metadata"]["counts"]
+    print(f"  OSM fixture: {counts}")
+
+    main_gs = preset_seats(obs)["main_grandstand"]
+    bare = compute_viewshed(dem, coords, main_gs["lon"], main_gs["lat"], main_gs["eye_height_m"])
+    with_obs = compute_viewshed(dem, coords, main_gs["lon"], main_gs["lat"], main_gs["eye_height_m"], obs)
+    ok = with_obs["visible_pct"] < bare["visible_pct"]
+    print(f"{'✓' if ok else '✗'} Main grandstand (eye {main_gs['eye_height_m']} m = {main_gs['tier_height_m']} m tier + 1.2 m):")
+    print(f"    Terrain only:      {bare['visible_pct']:.1f}%")
+    print(f"    With obstructions: {with_obs['visible_pct']:.1f}%")
+    all_ok &= ok
+
+    for seat in (BEHIND_BUILDING_SEAT, IN_WOOD_SEAT):
+        b = compute_viewshed(dem, coords, seat["lon"], seat["lat"], seat["eye_height_m"])
+        o = compute_viewshed(dem, coords, seat["lon"], seat["lat"], seat["eye_height_m"], obs)
+        ok = o["visible_pct"] < b["visible_pct"]
+        print(f"{'✓' if ok else '✗'} {seat['name']}: {b['visible_pct']:.1f}% -> {o['visible_pct']:.1f}% with obstructions")
+        all_ok &= ok
+
+    obs2 = build_obstructions(coords)
+    raster_same = hashlib.sha256(obs.layers_bytes()).hexdigest() == hashlib.sha256(obs2.layers_bytes()).hexdigest()
+    again = compute_viewshed(dem, coords, main_gs["lon"], main_gs["lat"], main_gs["eye_height_m"], obs2)
+    seat_again = preset_seats(obs2)["main_grandstand"]
+    deterministic = (raster_same and seat_again == main_gs and
+                     again["visibility"] == with_obs["visibility"] and
+                     again["visible_pct"] == with_obs["visible_pct"])
+    print(f"{'✓' if deterministic else '✗'} Results deterministic (surface model rebuilt, seat and viewshed identical): "
+          f"{'Yes' if deterministic else 'No'}")
+    all_ok &= deterministic
+    return all_ok
+
+
+def test_js_parity(fixture_dem: Path, analysis_path: Path) -> bool:
+    """Run viewer/viewshed.js under Node on fixture-exported data; compare with Python."""
+    node = shutil.which("node")
+    if node is None:
+        if os.environ.get("SKIP_JS_PARITY"):
+            print("! node not found, JS parity check skipped (SKIP_JS_PARITY set)")
+            return True
+        print("✗ node not found: install Node.js 18+ or set SKIP_JS_PARITY=1")
+        return False
+
+    from export_viewer_data import export_all
+    with tempfile.TemporaryDirectory() as tmp:
+        with contextlib.redirect_stdout(io.StringIO()):
+            track = export_all(analysis_path, fixture_dem, tmp, with_scene=False)
+        res = subprocess.run([node, str(SCRIPT_DIR / "js_viewshed.mjs"), tmp], capture_output=True, text=True)
+    if res.returncode != 0:
+        print(f"✗ JS viewshed failed: {res.stderr.strip()}")
+        return False
+    js = json.loads(res.stdout)
+
+    params_ok = js["params"]["los_samples"] == LOS_SAMPLES
+    print(f"{'✓' if params_ok else '✗'} Same line-of-sight sampling: JS {js['params']['los_samples']} "
+          f"vs Python {LOS_SAMPLES} samples per ray")
+
+    js_by_id = {s["id"]: s for s in js["seats"]}
+    worst = 0.0
+    print(f"    {'Preset':32s} {'terrain py/js':>15s} {'+obstr. py/js':>15s}")
+    for seat in track["preset_seats"]:
+        j = js_by_id[seat["id"]]
+        d1 = abs(j["visible_pct_bare"] - seat["visible_pct_bare"])
+        d2 = abs(j["visible_pct"] - seat["visible_pct"])
+        worst = max(worst, d1, d2)
+        print(f"    {seat['name'][:32]:32s} {seat['visible_pct_bare']:6.1f}/{j['visible_pct_bare']:6.1f}"
+              f"   {seat['visible_pct']:6.1f}/{j['visible_pct']:6.1f}")
+    ok = params_ok and worst <= 2.0
+    print(f"{'✓' if ok else '✗'} JS and Python agree on all {len(track['preset_seats'])} presets "
+          f"(max diff {worst:.2f} pp, tolerance 2 pp)")
+    return ok
 
 
 def test_ribbon_continuity() -> bool:
     """
-    Test that ribbon vertices sit above terrain at all exaggeration levels.
-    
-    This ensures the 3D ribbon in the viewer won't clip into the terrain mesh.
-    The viewer samples terrain height at each ribbon vertex using bilinear
-    interpolation on the same grid, plus a constant offset (RIBBON_OFFSET=2.5m).
+    Test that every ribbon vertex has terrain support in the viewer grid.
+
+    The viewer lifts the ribbon a constant RIBBON_OFFSET above the bilinear
+    terrain height (inside a group scaled by the exaggeration), so it can only
+    clip if a vertex falls outside the terrain grid.
     """
-    terrain_path = PROJECT_DIR / "viewer" / "data" / "terrain.json"
-    track_path = PROJECT_DIR / "viewer" / "data" / "track.json"
-    
-    if not terrain_path.exists() or not track_path.exists():
+    from surface_model import Terrain
+    data = PROJECT_DIR / "viewer" / "data"
+    if not (data / "terrain.json").exists() or not (data / "track.json").exists():
         print("- Viewer data not generated, skipping ribbon test")
         return True
-    
-    with open(terrain_path) as f:
-        terrain = json.load(f)
-    with open(track_path) as f:
+
+    with open(data / "terrain.json") as f:
+        meta = json.load(f)
+    with open(data / "track.json") as f:
         track = json.load(f)
-    
-    heights = np.array(terrain["heights"])
-    rows, cols = heights.shape
-    width = terrain["size_m"]["width"]
-    height = terrain["size_m"]["height"]
-    
-    points = track["points"]
+    heights = np.fromfile(data / meta["file"], dtype="<f4").reshape(meta["rows"], meta["cols"])
+    terrain = Terrain(heights, meta["left"], meta["top"], meta["res_x"], meta["res_y"])
+
     RIBBON_OFFSET = 5
-    
-    def sample_terrain(x, y):
-        """Bilinear interpolation matching viewer's sampleTerrainHeight."""
-        u = (x + width / 2) / width
-        v = (y + height / 2) / height
-        
-        if u < 0 or u > 1 or v < 0 or v > 1:
-            return None
-        
-        col = u * (cols - 1)
-        row = (1 - v) * (rows - 1)
-        
-        col0 = max(0, min(cols - 2, int(col)))
-        row0 = max(0, min(rows - 2, int(row)))
-        col1 = col0 + 1
-        row1 = row0 + 1
-        
-        dc = col - col0
-        dr = row - row0
-        
-        e00 = heights[row0, col0]
-        e01 = heights[row0, col1]
-        e10 = heights[row1, col0]
-        e11 = heights[row1, col1]
-        
-        return (e00 * (1 - dc) * (1 - dr) +
-                e01 * dc * (1 - dr) +
-                e10 * (1 - dc) * dr +
-                e11 * dc * dr)
-    
-    all_ok = True
-    exaggerations = [1.0, 1.5, 2.0]
-    
-    for exag in exaggerations:
-        below_count = 0
-        min_margin = float('inf')
-        
-        for p in points:
-            terrain_elev = sample_terrain(p["x"], p["y"])
-            if terrain_elev is None:
-                continue
-            
-            ribbon_elev = terrain_elev + RIBBON_OFFSET
-            margin = ribbon_elev - terrain_elev
-            min_margin = min(min_margin, margin)
-            
-            if ribbon_elev < terrain_elev:
-                below_count += 1
-        
-        ok = below_count == 0
-        status = "✓" if ok else "✗"
-        print(f"{status} Exaggeration {exag}×: ribbon above terrain at all {len(points)} vertices (min margin: {min_margin:.1f}m)")
-        
-        if not ok:
-            print(f"    WARNING: {below_count} vertices below terrain")
-            all_ok = False
-    
+    lons = np.array([p["lon"] for p in track["points"]])
+    lats = np.array([p["lat"] for p in track["points"]])
+    ground = terrain.sample(lons, lats)
+    missing = int(np.isnan(ground).sum())
+    all_ok = missing == 0
+    for exag in [1.0, 1.5, 2.0]:
+        print(f"{'✓' if all_ok else '✗'} Exaggeration {exag}×: ribbon above terrain at all {len(lons)} vertices "
+              f"(min margin: {RIBBON_OFFSET * exag:.1f}m)")
+    if missing:
+        print(f"    WARNING: {missing} vertices outside the terrain grid")
     return all_ok
 
 
@@ -426,56 +399,75 @@ def main():
     print("TRACK-LAB VERIFICATION")
     print("=" * 60)
     print()
-    
+
     print("1. GeoJSON Centreline")
     print("-" * 40)
     test_geojson_valid()
     print()
-    
+
     print("2. DEM Fixture")
     print("-" * 40)
     fixture_dem = test_fixture_exists()
     print()
-    
+
     print("3. Analysis Pipeline (on fixture)")
     print("-" * 40)
     analysis = run_analysis(fixture_dem)
     print()
-    
+
     print("4. Calibration vs Official Data")
     print("-" * 40)
     calibration_ok = test_calibration(analysis)
     print()
-    
+
     print("5. Viewer Data (optional)")
     print("-" * 40)
-    test_viewer_data()
+    viewer_ok = test_viewer_data()
     print()
-    
-    print("6. Viewshed Calculation (Spike 2)")
+
+    obs = build_obstructions(analysis["profile"]["coords"])
+
+    print("6. Viewshed Calculation (Spike 2, with obstructions)")
     print("-" * 40)
-    viewshed_ok = test_viewshed(fixture_dem, analysis)
+    viewshed_ok = test_viewshed(fixture_dem, analysis, obs)
     print()
-    
+
     print("7. Ribbon Continuity (Spike 2 v2)")
     print("-" * 40)
     ribbon_ok = test_ribbon_continuity()
     print()
-    
+
+    print("8. Obstructions: buildings, grandstands, canopy (Spike 3)")
+    print("-" * 40)
+    obstructions_ok = test_obstructions(fixture_dem, analysis, obs)
+    print()
+
+    print("9. JS vs Python viewshed parity (Spike 3)")
+    print("-" * 40)
+    with tempfile.TemporaryDirectory() as tmp:
+        analysis_path = Path(tmp) / "analysis.json"
+        with open(analysis_path, "w") as f:
+            json.dump(analysis, f)
+        parity_ok = test_js_parity(fixture_dem, analysis_path)
+    print()
+
     print("=" * 60)
-    all_ok = calibration_ok and viewshed_ok and ribbon_ok
-    if all_ok:
+    checks = {
+        "Calibration values outside tolerance": calibration_ok,
+        "Viewer data invalid or over budget": viewer_ok,
+        "Viewshed tests failed": viewshed_ok,
+        "Ribbon continuity test failed": ribbon_ok,
+        "Obstruction tests failed": obstructions_ok,
+        "JS/Python parity failed": parity_ok,
+    }
+    if all(checks.values()):
         print("VERIFICATION PASSED")
         return 0
-    else:
-        print("VERIFICATION FAILED")
-        if not calibration_ok:
-            print("  - Calibration values outside tolerance")
-        if not viewshed_ok:
-            print("  - Viewshed tests failed")
-        if not ribbon_ok:
-            print("  - Ribbon continuity test failed")
-        return 1
+    print("VERIFICATION FAILED")
+    for msg, ok in checks.items():
+        if not ok:
+            print(f"  - {msg}")
+    return 1
 
 
 if __name__ == "__main__":

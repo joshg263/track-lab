@@ -1,0 +1,14 @@
+{
+  "image": "red_bull_ring_s2cloudless.jpg",
+  "bbox": [
+    14.7241,
+    47.1893,
+    14.8006,
+    47.2564
+  ],
+  "width": 1928,
+  "height": 2490,
+  "zoom": 15,
+  "source": "https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless_3857/default/g/{z}/{y}/{x}.jpg",
+  "attribution": "Sentinel-2 cloudless - https://s2maps.eu by EOX IT Services GmbH (Contains modified Copernicus Sentinel data 2016 & 2017), CC BY 4.0"
+}

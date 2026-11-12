@@ -4,7 +4,9 @@
 #   make setup       - Install Python dependencies
 #   make fetch-dem   - Download DEM tiles for the track area
 #   make analyze     - Analyze track profile over DEM
-#   make viewer-data - Export data for 3D viewer
+#   make viewer-data - Export data for 3D viewer (terrain, track, obstructions, imagery)
+#   make fetch-obstructions - Refresh the committed OSM obstruction fixture (network)
+#   make fetch-imagery      - Re-bake the committed Sentinel-2 cloudless texture (network)
 #   make serve       - Start local viewer server
 #   make all         - Run full pipeline (fetch + analyze + viewer-data)
 #   make verify      - Run offline verification tests
@@ -16,9 +18,11 @@ PIP ?= pip3
 CENTRELINE = data/centrelines/red_bull_ring.geojson
 DEM_TILE = cache/dem/Copernicus_DSM_COG_10_N47_00_E014_00_DEM.tif
 ANALYSIS_JSON = data/analysis.json
-VIEWER_DATA = viewer/data/terrain.json viewer/data/track.json
+OBSTRUCTIONS = data/obstructions/red_bull_ring_osm.geojson
+IMAGERY = data/imagery/red_bull_ring_s2cloudless.jpg
+VIEWER_DATA = viewer/data/track.json
 
-.PHONY: all setup fetch-dem analyze viewer-data serve verify viewshed clean help
+.PHONY: all setup fetch-dem fetch-obstructions fetch-imagery analyze viewer-data serve verify viewshed screenshots clean help
 
 all: fetch-dem analyze viewer-data
 	@echo ""
@@ -32,6 +36,9 @@ help:
 	@echo "  fetch-dem   - Download DEM tiles (~25 MB)"
 	@echo "  analyze     - Analyze track profile"
 	@echo "  viewer-data - Export data for 3D viewer"
+	@echo "  fetch-obstructions - Refresh OSM buildings/grandstands/woods fixture"
+	@echo "  fetch-imagery      - Re-bake Sentinel-2 cloudless terrain texture"
+	@echo "  screenshots - Capture docs/after_*.png (needs 'make serve' running + Chrome)"
 	@echo "  serve       - Start local server at http://localhost:8000"
 	@echo "  verify      - Run offline verification tests"
 	@echo "  viewshed    - Compute viewshed (usage: make viewshed SEAT=lat,lon)"
@@ -53,13 +60,22 @@ $(ANALYSIS_JSON): $(CENTRELINE) $(DEM_TILE)
 
 viewer-data: $(VIEWER_DATA)
 
-$(VIEWER_DATA): $(ANALYSIS_JSON) $(DEM_TILE)
+$(VIEWER_DATA): $(ANALYSIS_JSON) $(DEM_TILE) $(OBSTRUCTIONS) $(IMAGERY) scripts/surface_model.py scripts/export_viewer_data.py
 	$(PYTHON) scripts/export_viewer_data.py \
 		--analysis $(ANALYSIS_JSON) \
 		--dem $(DEM_TILE) \
-		--buffer 0.015 \
-		--resolution 200 \
 		--output-dir viewer/data
+
+fetch-obstructions:
+	$(PYTHON) scripts/fetch_obstructions.py $(CENTRELINE) -o $(OBSTRUCTIONS)
+
+fetch-imagery: $(ANALYSIS_JSON)
+	$(PYTHON) scripts/fetch_imagery.py --analysis $(ANALYSIS_JSON)
+
+screenshots:
+	scripts/screenshot.sh docs/after_overview.png
+	scripts/screenshot.sh docs/after_eyeview.png "seat=main_grandstand&view=eye"
+	scripts/screenshot.sh docs/after_eyeview_turn1.png "seat=turn1_grandstand&view=eye&yaw=-25&pitch=-12"
 
 serve: viewer-data
 	$(PYTHON) scripts/serve.py 8000
@@ -97,7 +113,8 @@ viewshed: $(ANALYSIS_JSON)
 			--dem $(DEM_TILE) \
 			--centreline $(CENTRELINE) \
 			--seat "$(SEAT)" \
-			--analysis $(ANALYSIS_JSON); \
+			--analysis $(ANALYSIS_JSON) \
+			$(if $(NO_OBSTRUCTIONS),--no-obstructions,); \
 	fi
 
 clean:

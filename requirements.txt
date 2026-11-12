@@ -5,3 +5,5 @@ numpy==1.26.4
 rasterio==1.3.10      # GeoTIFF reading (uses GDAL)
 pyproj==3.6.1         # Coordinate transforms
 scipy==1.12.0         # Smoothing, interpolation
+shapely==2.0.4        # OSM multipolygons, clipping, grandstand seats
+pillow==10.3.0        # Imagery bake (fetch_imagery.py only)
