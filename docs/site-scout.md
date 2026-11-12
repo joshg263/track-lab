@@ -1,131 +1,137 @@
-# Japan Site Scout - Spike 4
+# Japan Site Scout - Spike 4 (Kansai Focus)
 
-This spike identifies candidate natural bowls and valleys in Japan that could hold an F1-style circuit, using free public elevation data and deterministic terrain analysis.
+This spike identifies candidate natural bowls and valleys in Japan's Kansai region that could hold an F1-style circuit, using free public elevation data and systematic terrain analysis.
+
+## Scope
+
+**Kansai region only**: Osaka, Kyoto, Hyogo, Nara, Shiga, Wakayama, Mie prefectures.
 
 ## Selected Sites
 
-| Site | Prefecture | Lat/Lon | Diameter | Relief | Floor Flat | Rim Slopes | Best VP Visibility | Nearest Town | Why It Fits |
-|------|------------|---------|----------|--------|------------|------------|-------------------|--------------|-------------|
-| **Yamanashi Basin** | Yamanashi | 35.68°N, 138.55°E | 2,488 m | 86 m | 88% | 10°–28° | 61.4% | Kofu area | Natural bowl with ideal dimensions |
-| **Sado Highland** | Niigata | 38.05°N, 138.38°E | 1,903 m | 92 m | 64% | 4°–16° | 53.6% | Sado Island | Very flat floor for track layout |
-| **Hitoyoshi Basin** | Kumamoto | 32.22°N, 130.78°E | 2,005 m | 50 m | 69% | 4°–17° | 37.7% | Nishiki (6 km) | Natural bowl with ideal dimensions |
-| **Iwaki Basin** | Aomori | 40.65°N, 140.25°E | 1,780 m | 158 m | 26% | 8°–20° | 16.7% | Northern highlands | Good balance of size and enclosure |
+| Site | Prefecture | Lat/Lon | Floor Extent | Relief | Rim Slopes | Rim Contiguous | Best VP | Floor Mean | Nearest Town |
+|------|------------|---------|--------------|--------|------------|----------------|---------|------------|--------------|
+| **Nishiwaki Basin** | Hyogo | 34.99°N, 135.01°E | 2,356 m | 127 m | 7°–33° | 350 m | 57.5% | 16.8% | Nishiwaki (2.8 km) |
+
+Only **1 survivor** from systematic Kansai scan. The region's topography consists mostly of mountain valleys that exceed the target size (4000m+) or relief (200m+).
 
 ## Site Criteria
 
-### Hard Filters
-- **Diameter**: 2–3 km across (relaxed to 1.5–4 km for initial scan)
-- **Relief**: 50–150 m between floor and rim (relaxed to 40–180 m)
-- **Rim slopes**: 10–30° on at least part of the rim (suitable for grandstands)
-
-### Soft Filters
-- **Floor flatness**: Percentage of floor cells under 5° slope
-- **Arena effect**: Best viewpoint floor visibility (what % of the floor is visible from the best rim position)
+### Hard Filters (Strict - No Relaxation)
+- **Floor extent**: 2–3 km across (bounding box of floor region)
+- **Relief**: 50–150 m between floor and rim
+- **Rim slopes**: 10–30° over at least 300m contiguous stretch (suitable for grandstands)
+- **Arena check**: Best rim viewpoint floor visibility must exceed mean of 10 seeded-random floor points
 
 ### Exclusions
-- OSM `boundary=national_park` within 1 km
-- OSM `place=city` or `place=town` within 1 km
-- OSM `landuse=residential` (dense residential areas)
+- OSM `boundary=national_park` centroid intersection
+- OSM `boundary=protected_area` with `protect_class` in (1, 1a, 1b, 2) - core protected zones
+- OSM `place=city|town|village` within ~1 km
+- OSM `landuse=residential` with >10% floor overlap
+
+## Scan Funnel
+
+```
+Cells scanned:        15,840,000 (11 GLO-90 tiles)
+Coarse candidates:           75 (TPI basin detection)
+Refined at GLO-30:           40
+After strict filters:         1
+After OSM exclusions:         1
+Final survivors:              1
+```
+
+### Common Rejection Reasons
+
+Most candidates failed for:
+- Floor extent > 3000m (typically 4000-4500m) - valleys are too large
+- Relief > 150m (typically 200-300m) - too much vertical drop
+- Rim contiguous < 300m - insufficient grandstand-suitable terrain
 
 ## Methodology
 
-### Stage 1: Coarse Scan
-Used pre-researched candidate coordinates based on Japan's topographic features (volcanic calderas, highland basins, river valleys). Downloaded Copernicus GLO-30 DEM at 30m resolution for each candidate.
+### Stage 1: Download GLO-90 Tiles
+Download Copernicus GLO-90 (90m resolution) tiles covering Kansai region (11 tiles total).
 
-### Stage 2: Terrain Analysis
-For each site:
-1. Compute floor elevation (15th percentile) and rim elevation (85th percentile)
-2. Calculate relief (rim - floor)
-3. Compute floor flatness using slope gradient
-4. Identify rim cells with suitable grandstand slopes (10–30°)
+### Stage 2: Basin Detection
+For each tile:
+1. Compute Topographic Position Index (TPI) at radius 5 cells
+2. Find local minima using minimum filter (11x11 kernel)
+3. Seed depressions where TPI < -8 and is local minimum
+4. Flood fill from seeds up to 100m above floor to define basin extent
+5. Apply coarse filters (60% of strict thresholds) to reduce candidates
 
-### Stage 3: Viewshed Analysis
-Sample viewpoints around the rim and compute line-of-sight visibility to floor cells:
-- Observer height: 2m above ground
-- Target height: 1m above ground (track surface)
-- Best viewpoint: highest floor visibility percentage
+### Stage 3: GLO-30 Refinement
+Download 30m resolution DEM for top ~40 candidates and:
+1. Recompute floor/rim from actual percentiles
+2. Measure floor extent as bounding box dimension
+3. Compute slope gradient and identify 10-30° rim cells
+4. Find contiguous 10-30° slope regions and measure extent
+5. Apply strict filters with no relaxation
 
-### Stage 4: Exclusion Check
-Query OSM Overpass API for national parks and towns within buffer distance. Sites with blocking exclusions are removed.
+### Stage 4: Viewshed Analysis
+For passing candidates:
+- Sample 15 rim points and compute floor visibility
+- Sample 10 seeded-random floor points and compute their visibility
+- Best viewpoint must exceed mean floor visibility (arena effect)
 
-### Stage 5: Geographic Diversity
-Select final sites to maximize geographic spread across Japan while prioritizing viewshed quality.
+### Stage 5: OSM Exclusion Check
+Query Overpass API for parks, protected areas, towns, residential zones. Reject if:
+- Centroid in national park core
+- >10% floor overlaps residential
+- Town/village within 1km buffer
 
 ## Pipeline Usage
 
 ```bash
-# Run the full pipeline (downloads DEM, analyzes, generates viewer data)
-make site-scout
+# Run systematic Kansai scan
+python3 scripts/site_scout/kansai_scan.py
 
-# Generate viewer data for already-committed sites
-make site-scout-data
+# Generate viewer data for survivors
+python3 scripts/site_scout/generate_site_data.py
+python3 scripts/site_scout/export_viewer_data.py
 
-# Verify all site metrics
+# Verify site metrics
 make site-scout-verify
 ```
 
 ## Viewer
 
-View selected sites in the 3D terrain viewer:
-
 ```bash
 make serve
-# Open http://localhost:8000/site.html
-# Or directly: http://localhost:8000/site.html?site=yamanashi_basin
+# Open http://localhost:8000/site.html?site=nishiwaki_basin
 ```
 
-The viewer supports:
+Features:
 - Site selector dropdown
-- "Best Viewpoint" button (positions camera at optimal viewing point)
+- "Best Viewpoint" button (positions camera at optimal rim viewing point)
 - Overview button (returns to default camera)
 - Vertical exaggeration control
-
-## Excluded Sites
-
-The following pre-researched candidates were excluded:
-
-| Site | Reason |
-|------|--------|
-| Aso Caldera | Relief too high (230m) - volcanic terrain too steep |
-| Hakone Caldera | Relief too high (331m) |
-| Bandai Highland | Relief too high (518m) |
-| Kirishima Basin | Relief too high (249m) |
-| Nasu Highland | Relief too high (556m) |
-| Kamikawa Basin (Hokkaido) | Relief too low (10m) - too flat |
-| Aizu Basin | Relief too low (11m) |
 
 ## Data Sources
 
 | Data | Source | License |
 |------|--------|---------|
-| Elevation | [Copernicus DEM GLO-30](https://spacedata.copernicus.eu/collections/copernicus-digital-elevation-model) | Free & open (Copernicus) |
+| Elevation | [Copernicus DEM GLO-90/30](https://spacedata.copernicus.eu/collections/copernicus-digital-elevation-model) | Free & open (Copernicus) |
 | Imagery | [Sentinel-2 cloudless](https://s2maps.eu) by EOX IT Services GmbH | CC BY 4.0 |
 | Exclusions | [OpenStreetMap](https://www.openstreetmap.org/copyright) | ODbL 1.0 |
 
 ## Caveats
 
-1. **DEM Resolution**: 30m resolution means small-scale terrain features are smoothed. Actual site surveys would reveal more detail.
+1. **One Survivor**: The strict criteria yield only one site in Kansai. Japan's mountain valleys tend to be larger (4000m+) with steeper relief (200m+) than the target bowl shape.
 
-2. **Viewshed Simplification**: The viewshed algorithm uses a simplified line-of-sight calculation without considering vegetation or structures that may not be in the DEM.
+2. **DEM Resolution**: 30m resolution smooths small-scale terrain features. Actual site surveys would reveal more detail.
 
-3. **OSM Coverage**: OSM exclusion data coverage varies by region. Some national parks or towns may not be fully mapped.
+3. **Viewshed Simplification**: Line-of-sight calculation doesn't account for vegetation or structures not in DEM.
 
-4. **Land Ownership**: This analysis does not consider land ownership, access rights, or development restrictions. Actual site selection would require legal and administrative review.
+4. **OSM Coverage**: Exclusion data varies by region. Some protected areas may not be fully mapped.
 
-5. **Geologic Suitability**: Terrain shape does not indicate soil stability, drainage, or other construction factors.
+5. **Land Ownership**: Analysis doesn't consider ownership, access rights, or development restrictions.
 
-## What I'd Do Differently With More Time
+6. **Geologic Suitability**: Terrain shape doesn't indicate soil stability, drainage, or construction factors.
 
-1. **Broader Scan**: Use GLO-90 (90m resolution) to scan all of Japan systematically, then refine promising areas at 30m.
+## Anti-Jobs
 
-2. **Multi-scale Analysis**: Implement proper topographic position index (TPI) at multiple scales to find enclosed depressions algorithmically.
-
-3. **Better Locality Names**: Use reverse geocoding APIs for accurate place names instead of OSM node queries.
-
-4. **Infrastructure Proximity**: Consider proximity to highways, rail stations, and airports for accessibility.
-
-5. **Climate Data**: Incorporate precipitation and temperature data for race calendar planning.
-
-6. **3D Viewshed**: Full 3D viewshed analysis with proper obstruction modeling (trees, buildings from OSM).
-
-7. **Interactive Selection**: Allow users to click on the map to analyze custom locations in real-time.
+This spike explicitly does NOT:
+- Search regions outside Kansai
+- Design track layouts
+- Require API keys or paid data sources
+- Polish the viewer beyond functional state

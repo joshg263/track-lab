@@ -63,9 +63,14 @@ def compute_metrics_from_dem(dem: np.ndarray, cell_size_m: float) -> dict:
     relief_m = rim_elev - floor_elev
     
     floor_mask = dem < floor_elev + relief_m * 0.3
-    floor_cells = floor_mask.sum()
-    floor_area_m2 = floor_cells * cell_size_m * cell_size_m
-    diameter_m = 2 * math.sqrt(floor_area_m2 / math.pi)
+    floor_rows, floor_cols = np.where(floor_mask)
+    
+    if len(floor_rows) > 0:
+        extent_y = (floor_rows.max() - floor_rows.min()) * cell_size_m
+        extent_x = (floor_cols.max() - floor_cols.min()) * cell_size_m
+        floor_extent_m = max(extent_x, extent_y)
+    else:
+        floor_extent_m = 0
     
     dy, dx = np.gradient(dem, cell_size_m)
     slope = np.degrees(np.arctan(np.sqrt(dx**2 + dy**2)))
@@ -73,16 +78,25 @@ def compute_metrics_from_dem(dem: np.ndarray, cell_size_m: float) -> dict:
     floor_slopes = slope[floor_mask & valid]
     floor_flat_pct = float((floor_slopes < 5).sum() / max(len(floor_slopes), 1) * 100)
     
-    rim_mask = (dem > floor_elev + relief_m * 0.5) & (dem < rim_elev + 20)
+    from scipy.ndimage import binary_dilation, label
+    rim_mask = binary_dilation(floor_mask, iterations=3) & ~floor_mask
     rim_slopes = slope[rim_mask & valid]
-    rim_slope_min = float(np.percentile(rim_slopes, 20)) if len(rim_slopes) > 0 else 0
-    rim_slope_max = float(np.percentile(rim_slopes, 80)) if len(rim_slopes) > 0 else 0
+    rim_slope_min = float(np.percentile(rim_slopes, 15)) if len(rim_slopes) > 0 else 0
+    rim_slope_max = float(np.percentile(rim_slopes, 85)) if len(rim_slopes) > 0 else 0
+    
+    good_rim = rim_mask & (slope >= 10) & (slope <= 30)
+    labeled_good, n_good = label(good_rim)
+    max_contiguous = 0
+    for j in range(1, n_good + 1):
+        max_contiguous = max(max_contiguous, (labeled_good == j).sum())
+    rim_contiguous_m = math.sqrt(max_contiguous) * cell_size_m
     
     return {
         "relief_m": relief_m,
-        "diameter_m": diameter_m,
+        "floor_extent_m": floor_extent_m,
         "floor_flat_pct": floor_flat_pct,
         "rim_slope_range": (rim_slope_min, rim_slope_max),
+        "rim_contiguous_m": rim_contiguous_m,
     }
 
 
@@ -135,9 +149,9 @@ def test_hard_filters(slug: str, data: dict) -> tuple[bool, dict]:
     metrics = compute_metrics_from_dem(dem, cell_size_m)
     
     checks = {
-        "diameter_2_3km": 1500 <= metrics["diameter_m"] <= 4000,
-        "relief_50_150m": 40 <= metrics["relief_m"] <= 180,
-        "rim_slope_10_30deg": 5 <= metrics["rim_slope_range"][1] <= 40,
+        "floor_extent_2_3km": 2000 <= metrics["floor_extent_m"] <= 3000,
+        "relief_50_150m": 50 <= metrics["relief_m"] <= 150,
+        "rim_contiguous_300m_10_30deg": metrics["rim_contiguous_m"] >= 300,
     }
     
     all_pass = all(checks.values())
@@ -161,13 +175,14 @@ def test_determinism(slug: str, data: dict) -> bool:
     
     return (
         metrics1["relief_m"] == metrics2["relief_m"] and
-        metrics1["diameter_m"] == metrics2["diameter_m"] and
-        metrics1["floor_flat_pct"] == metrics2["floor_flat_pct"]
+        metrics1["floor_extent_m"] == metrics2["floor_extent_m"] and
+        metrics1["floor_flat_pct"] == metrics2["floor_flat_pct"] and
+        metrics1["rim_contiguous_m"] == metrics2["rim_contiguous_m"]
     )
 
 
 def test_viewpoint_vs_floor(slug: str, data: dict) -> tuple[bool, dict]:
-    """Verify best viewpoint visibility > random floor point visibility."""
+    """Verify best viewpoint visibility > mean of 10 seeded-random floor points."""
     dem = data["dem"]
     scene = data["scene"]
     transform = data["transform"]
@@ -181,17 +196,29 @@ def test_viewpoint_vs_floor(slug: str, data: dict) -> tuple[bool, dict]:
     relief_m = rim_elev - floor_elev
     floor_mask = dem < floor_elev + relief_m * 0.3
     
-    center_r, center_c = dem.shape[0] // 2, dem.shape[1] // 2
-    floor_center_vis = compute_visibility_from_point(dem, center_r, center_c, floor_mask)
+    rng = np.random.default_rng(seed=42)
+    floor_cells = np.argwhere(floor_mask)
+    n_samples = min(10, len(floor_cells))
+    
+    floor_vis_list = []
+    if n_samples > 0:
+        indices = rng.choice(len(floor_cells), size=n_samples, replace=False)
+        for idx in indices:
+            r, c = floor_cells[idx]
+            vis = compute_visibility_from_point(dem, r, c, floor_mask)
+            floor_vis_list.append(vis)
+    
+    mean_floor_vis = float(np.mean(floor_vis_list)) if floor_vis_list else 0
     
     best_vp = scene.get("best_viewpoint", {})
     best_vp_vis = best_vp.get("visibility_pct", 0)
     
-    passed = best_vp_vis > floor_center_vis
+    passed = best_vp_vis > mean_floor_vis
     
     return passed, {
         "best_viewpoint_visibility_pct": best_vp_vis,
-        "floor_center_visibility_pct": floor_center_vis,
+        "mean_floor_visibility_pct": mean_floor_vis,
+        "n_floor_samples": n_samples,
     }
 
 
@@ -265,8 +292,9 @@ def run_all_tests() -> int:
             s = "✓" if passed else "✗"
             print(f"    {s} {check}")
         m = hf_info["computed"]
-        print(f"    Computed: diameter={m['diameter_m']:.0f}m, relief={m['relief_m']:.0f}m, "
-              f"floor_flat={m['floor_flat_pct']:.0f}%, rim_slopes={m['rim_slope_range']}")
+        print(f"    Computed: floor_extent={m['floor_extent_m']:.0f}m, relief={m['relief_m']:.0f}m, "
+              f"floor_flat={m['floor_flat_pct']:.0f}%, rim_slopes={m['rim_slope_range']}, "
+              f"rim_contiguous={m['rim_contiguous_m']:.0f}m")
         if not hf_pass:
             all_passed = False
         
@@ -279,7 +307,7 @@ def run_all_tests() -> int:
         vp_pass, vp_info = test_viewpoint_vs_floor(slug, data)
         status = "✓" if vp_pass else "✗"
         print(f"{status} Best viewpoint ({vp_info['best_viewpoint_visibility_pct']:.1f}%) > "
-              f"floor center ({vp_info['floor_center_visibility_pct']:.1f}%)")
+              f"mean of {vp_info['n_floor_samples']} floor points ({vp_info['mean_floor_visibility_pct']:.1f}%)")
         if not vp_pass:
             all_passed = False
         

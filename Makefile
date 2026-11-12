@@ -132,16 +132,16 @@ clean-all: clean
 
 .PHONY: site-scout site-scout-data site-scout-verify site-scout-screenshots
 
-# Run the full site scouting pipeline
+# Run the full site scouting pipeline (Kansai region)
 site-scout:
-	@echo "Running Japan site scouting pipeline..."
-	$(PYTHON) scripts/site_scout/quick_pipeline.py --final-count 4
+	@echo "Running Kansai site scouting pipeline..."
+	$(PYTHON) scripts/site_scout/kansai_scan.py
 	@echo ""
 	@echo "Generating viewer data for selected sites..."
 	$(PYTHON) scripts/site_scout/generate_site_data.py
 	$(PYTHON) scripts/site_scout/export_viewer_data.py
 	@echo ""
-	@echo "Site scouting complete! View sites at http://localhost:8000/viewer/site.html"
+	@echo "Site scouting complete! View sites at http://localhost:8000/site.html"
 
 # Generate viewer data for committed sites (offline, no network)
 site-scout-data:
