@@ -29,7 +29,7 @@ from typing import Optional
 import numpy as np
 import rasterio
 
-from corner_detection import analyze_corners_xy, radii_from_curvature
+from corner_detection import analyze_corners_xy
 
 SITE_DIR = Path(__file__).parent.parent / "data" / "sites" / "nishiwaki_basin"
 LAYOUTS_DIR = SITE_DIR / "layouts"
