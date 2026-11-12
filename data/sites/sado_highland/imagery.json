@@ -1,0 +1,12 @@
+{
+  "image": "imagery.jpg",
+  "bbox": [
+    138.365,
+    38.035,
+    138.395,
+    38.065
+  ],
+  "width": 877,
+  "height": 1113,
+  "attribution": "Sentinel-2 cloudless - https://s2maps.eu by EOX IT Services GmbH (Contains modified Copernicus Sentinel data 2016 & 2017), CC BY 4.0"
+}

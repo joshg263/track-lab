@@ -1,0 +1,156 @@
+{
+  "sites": [
+    {
+      "slug": "hitoyoshi_basin",
+      "name": "Hitoyoshi Basin",
+      "prefecture": "Kumamoto",
+      "lat": 32.22,
+      "lon": 130.78,
+      "metrics": {
+        "floor_elev_m": 114.8,
+        "rim_elev_m": 165.0,
+        "relief_m": 50.2,
+        "diameter_m": 2005.0,
+        "floor_flat_pct": 69.1,
+        "rim_slope_range": [
+          3.5,
+          17.2
+        ],
+        "best_viewpoint": {
+          "lat": 32.23403,
+          "lon": 130.77014,
+          "visibility_pct": 38.5,
+          "elevation_m": 164.8,
+          "row": 4,
+          "col": 19
+        },
+        "floor_center_visibility_pct": 0.0,
+        "dem_rows": 108,
+        "dem_cols": 108,
+        "cell_size_m": 26.16
+      },
+      "best_viewpoint": {
+        "lat": 32.23403,
+        "lon": 130.77014,
+        "visibility_pct": 38.5,
+        "elevation_m": 164.8,
+        "row": 4,
+        "col": 19
+      }
+    },
+    {
+      "slug": "iwaki_basin",
+      "name": "Iwaki Basin",
+      "prefecture": "Aomori",
+      "lat": 40.65,
+      "lon": 140.25,
+      "metrics": {
+        "floor_elev_m": 427.8,
+        "rim_elev_m": 586.2,
+        "relief_m": 158.4,
+        "diameter_m": 1780.0,
+        "floor_flat_pct": 26.0,
+        "rim_slope_range": [
+          7.5,
+          19.8
+        ],
+        "best_viewpoint": {
+          "lat": 40.65236,
+          "lon": 140.24514,
+          "visibility_pct": 16.9,
+          "elevation_m": 519.9,
+          "row": 46,
+          "col": 37
+        },
+        "floor_center_visibility_pct": 0.0,
+        "dem_rows": 108,
+        "dem_cols": 108,
+        "cell_size_m": 23.46
+      },
+      "best_viewpoint": {
+        "lat": 40.65236,
+        "lon": 140.24514,
+        "visibility_pct": 16.9,
+        "elevation_m": 519.9,
+        "row": 46,
+        "col": 37
+      }
+    },
+    {
+      "slug": "sado_highland",
+      "name": "Sado Highland",
+      "prefecture": "Niigata",
+      "lat": 38.05,
+      "lon": 138.38,
+      "metrics": {
+        "floor_elev_m": 21.1,
+        "rim_elev_m": 113.2,
+        "relief_m": 92.1,
+        "diameter_m": 1903.0,
+        "floor_flat_pct": 63.6,
+        "rim_slope_range": [
+          3.7,
+          16.0
+        ],
+        "best_viewpoint": {
+          "lat": 38.06514,
+          "lon": 138.38097,
+          "visibility_pct": 52.2,
+          "elevation_m": 112.6,
+          "row": 0,
+          "col": 58
+        },
+        "floor_center_visibility_pct": 2.2,
+        "dem_rows": 108,
+        "dem_cols": 108,
+        "cell_size_m": 24.35
+      },
+      "best_viewpoint": {
+        "lat": 38.06514,
+        "lon": 138.38097,
+        "visibility_pct": 52.2,
+        "elevation_m": 112.6,
+        "row": 0,
+        "col": 58
+      }
+    },
+    {
+      "slug": "yamanashi_basin",
+      "name": "Yamanashi Basin",
+      "prefecture": "Yamanashi",
+      "lat": 35.68,
+      "lon": 138.55,
+      "metrics": {
+        "floor_elev_m": 277.8,
+        "rim_elev_m": 363.4,
+        "relief_m": 85.6,
+        "diameter_m": 2488.0,
+        "floor_flat_pct": 87.5,
+        "rim_slope_range": [
+          10.2,
+          28.0
+        ],
+        "best_viewpoint": {
+          "lat": 35.68181,
+          "lon": 138.55208,
+          "visibility_pct": 74.5,
+          "elevation_m": 324.4,
+          "row": 48,
+          "col": 62
+        },
+        "floor_center_visibility_pct": 11.6,
+        "dem_rows": 108,
+        "dem_cols": 108,
+        "cell_size_m": 25.12
+      },
+      "best_viewpoint": {
+        "lat": 35.68181,
+        "lon": 138.55208,
+        "visibility_pct": 74.5,
+        "elevation_m": 324.4,
+        "row": 48,
+        "col": 62
+      }
+    }
+  ]
+}

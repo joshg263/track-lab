@@ -1,0 +1,44 @@
+{
+  "slug": "yamanashi_basin",
+  "name": "Yamanashi Basin",
+  "prefecture": "Yamanashi",
+  "lat": 35.68,
+  "lon": 138.55,
+  "nearest_town": {
+    "name": "Unknown",
+    "distance_m": 0
+  },
+  "why_it_fits": "Natural bowl with ideal dimensions",
+  "metrics": {
+    "floor_elev_m": 277.8,
+    "rim_elev_m": 363.4,
+    "relief_m": 85.6,
+    "diameter_m": 2488.0,
+    "floor_flat_pct": 87.5,
+    "rim_slope_range": [
+      10.2,
+      28.0
+    ],
+    "best_viewpoint": {
+      "lat": 35.68181,
+      "lon": 138.55208,
+      "visibility_pct": 74.5,
+      "elevation_m": 324.4,
+      "row": 48,
+      "col": 62
+    },
+    "floor_center_visibility_pct": 11.6,
+    "dem_rows": 108,
+    "dem_cols": 108,
+    "cell_size_m": 25.12
+  },
+  "files": {
+    "dem": "dem.tif",
+    "imagery": "imagery.jpg",
+    "imagery_meta": "imagery.json"
+  },
+  "attribution": [
+    "Elevation: Copernicus DEM GLO-30 (ESA / Copernicus)",
+    "Sentinel-2 cloudless - https://s2maps.eu by EOX IT Services GmbH (Contains modified Copernicus Sentinel data 2016 & 2017), CC BY 4.0"
+  ]
+}

@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Track Lab - Japan Site Scout</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            overflow: hidden;
+        }
+        #canvas-container { width: 100vw; height: 100vh; }
+
+        .panel {
+            position: fixed;
+            background: rgba(0, 0, 0, 0.85);
+            padding: 15px;
+            border-radius: 8px;
+            font-size: 13px;
+            z-index: 100;
+        }
+        #controls { top: 20px; left: 20px; max-width: 300px; }
+        #controls h2 { margin-bottom: 10px; font-size: 16px; color: #ff6b6b; }
+        #controls h3 {
+            margin-top: 12px; margin-bottom: 8px; font-size: 13px;
+            color: #4ecdc4; border-top: 1px solid #333; padding-top: 10px;
+        }
+        #controls label { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+        #controls input[type="range"] { flex: 1; accent-color: #ff6b6b; }
+        #controls select {
+            flex: 1; background: #333; color: #eee;
+            border: 1px solid #555; padding: 5px; border-radius: 4px;
+        }
+        #controls button {
+            background: #4ecdc4; color: #1a1a2e; border: none;
+            padding: 8px 12px; border-radius: 4px; cursor: pointer;
+            margin: 3px 2px; font-size: 12px; font-weight: 500;
+        }
+        #controls button:hover { background: #3dbdb5; }
+        #controls button.secondary { background: #444; color: #eee; }
+        #controls button.secondary:hover { background: #555; }
+        #controls button.viewpoint { background: #f9ca24; color: #1a1a2e; }
+        #controls button.viewpoint:hover { background: #e0b820; }
+
+        .site-info {
+            background: rgba(78, 205, 196, 0.15);
+            border: 1px solid #4ecdc4;
+            border-radius: 4px; padding: 10px; margin: 10px 0; font-size: 12px;
+        }
+        .site-info .name { font-weight: bold; color: #4ecdc4; font-size: 14px; }
+        .site-info .prefecture { color: #888; font-size: 11px; }
+        .site-info .metric { margin-top: 4px; }
+        .site-info .value { color: #00ffcc; font-weight: bold; }
+
+        #stats { top: 20px; right: 20px; max-width: 240px; }
+        #stats h2 { margin-bottom: 10px; font-size: 16px; color: #4ecdc4; }
+        #stats table { width: 100%; border-collapse: collapse; }
+        #stats td { padding: 3px 0; }
+        #stats td:first-child { color: #888; }
+        #stats td:last-child { text-align: right; font-family: monospace; color: #00ffcc; }
+
+        #loading {
+            position: fixed; top: 50%; left: 50%;
+            transform: translate(-50%, -50%); font-size: 18px; z-index: 1000;
+        }
+
+        .help {
+            position: fixed; bottom: 20px; left: 20px;
+            background: rgba(0, 0, 0, 0.7); padding: 8px 12px;
+            border-radius: 6px; font-size: 11px; color: #bbb; z-index: 100;
+        }
+        #attribution {
+            position: fixed; bottom: 4px; left: 50%; transform: translateX(-50%);
+            font-size: 10px; color: rgba(255, 255, 255, 0.85);
+            text-shadow: 0 0 3px #000; z-index: 100; white-space: nowrap;
+        }
+        #attribution a { color: inherit; }
+
+        .viewpoint-marker {
+            background: rgba(249, 202, 36, 0.9);
+            color: #1a1a2e;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: bold;
+            pointer-events: none;
+            white-space: nowrap;
+            border: 2px solid #f9ca24;
+        }
+    </style>
+</head>
+<body>
+    <div id="loading">Loading site data...</div>
+    <div id="canvas-container"></div>
+
+    <div id="controls" class="panel">
+        <h2>🗾 Japan Site Scout</h2>
+        <label>
+            Site
+            <select id="site-select"></select>
+        </label>
+        
+        <div class="site-info" id="site-info" style="display: none;">
+            <div class="name" id="site-name">-</div>
+            <div class="prefecture" id="site-prefecture">-</div>
+            <div class="metric">Diameter: <span class="value" id="site-diameter">-</span></div>
+            <div class="metric">Relief: <span class="value" id="site-relief">-</span></div>
+            <div class="metric">Floor flat: <span class="value" id="site-floor-flat">-</span></div>
+            <div class="metric">Rim slopes: <span class="value" id="site-rim-slopes">-</span></div>
+        </div>
+
+        <h3>📍 Viewpoint</h3>
+        <div>
+            <button id="btn-best-viewpoint" class="viewpoint">🔭 Best Viewpoint</button>
+            <button id="btn-overview" class="secondary">🌐 Overview</button>
+        </div>
+        <div id="viewpoint-info" style="margin-top: 8px; font-size: 11px; color: #888; display: none;">
+            Floor visibility: <span id="viewpoint-visibility" style="color: #00ffcc;">-</span>
+        </div>
+
+        <h3>⚙️ Display</h3>
+        <label id="exag-label">
+            Vert. Exag.
+            <input type="range" id="exaggeration" min="1" max="5" step="0.5" value="1.5">
+            <span id="exag-value">1.5×</span>
+        </label>
+    </div>
+
+    <div id="stats" class="panel">
+        <h2>Site Metrics</h2>
+        <table>
+            <tr><td>Center Lat</td><td id="stat-lat">-</td></tr>
+            <tr><td>Center Lon</td><td id="stat-lon">-</td></tr>
+            <tr><td>Min Elev</td><td id="stat-min-elev">-</td></tr>
+            <tr><td>Max Elev</td><td id="stat-max-elev">-</td></tr>
+            <tr><td>Relief</td><td id="stat-relief">-</td></tr>
+        </table>
+        <div id="why-fits" style="margin-top: 12px; font-size: 11px; color: #f9ca24; font-style: italic;"></div>
+    </div>
+
+    <div class="help" id="help">
+        Drag to orbit • Scroll to zoom • Select a site to explore
+    </div>
+    <div id="attribution"></div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.162.0/examples/jsm/"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+        import { Sky } from 'three/addons/objects/Sky.js';
+
+        const params = new URLSearchParams(location.search);
+        const SITES_BASE = 'data/sites';
+
+        let scene, camera, renderer, labelRenderer, controls, world, sky, sun;
+        let terrainMesh, viewpointMarker;
+        let terrain, terrainMeta, sceneData;
+        let frame = { lon0: 0, lat0: 0, sx: 111320, sy: 111320 };
+        let baseElevation = 0;
+        let sitesIndex = [];
+        let currentSite = null;
+        let atViewpoint = false;
+
+        const ORBIT_FOV = 50;
+        const SUN_ELEVATION_DEG = 45;
+        const SUN_AZIMUTH_DEG = 180;
+        const HAZE_COLOR = new THREE.Color(0xc9d8e8);
+
+        async function loadBinary(url, Type) {
+            const res = await fetch(url);
+            if (!res.ok) throw new Error(`${url}: ${res.status}`);
+            return new Type(await res.arrayBuffer());
+        }
+
+        async function loadSitesIndex() {
+            try {
+                const res = await fetch(`${SITES_BASE}/index.json`);
+                const data = await res.json();
+                sitesIndex = data.sites || [];
+                
+                const select = document.getElementById('site-select');
+                select.innerHTML = '<option value="">Choose a site...</option>';
+                sitesIndex.forEach(site => {
+                    const opt = document.createElement('option');
+                    opt.value = site.slug;
+                    opt.textContent = `${site.name}, ${site.prefecture}`;
+                    select.appendChild(opt);
+                });
+                
+                return sitesIndex;
+            } catch (e) {
+                console.error('Failed to load sites index:', e);
+                return [];
+            }
+        }
+
+        async function loadSite(slug) {
+            if (!slug) return null;
+            
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('loading').textContent = `Loading ${slug}...`;
+            
+            try {
+                const [tm, sc] = await Promise.all([
+                    fetch(`${SITES_BASE}/${slug}/terrain.json`).then(r => r.json()),
+                    fetch(`${SITES_BASE}/${slug}/scene.json`).then(r => r.json()),
+                ]);
+                terrainMeta = tm;
+                sceneData = sc;
+                
+                const [heights, tex] = await Promise.all([
+                    loadBinary(`${SITES_BASE}/${slug}/${terrainMeta.file}`, Float32Array),
+                    new THREE.TextureLoader().loadAsync(`${SITES_BASE}/${slug}/${sceneData.imagery.file}`),
+                ]);
+                
+                terrain = {
+                    heights, rows: terrainMeta.rows, cols: terrainMeta.cols,
+                    left: terrainMeta.left, top: terrainMeta.top,
+                    resX: terrainMeta.res_x, resY: terrainMeta.res_y,
+                };
+                
+                frame = {
+                    lon0: sceneData.frame.lon0,
+                    lat0: sceneData.frame.lat0,
+                    sx: 111320 * Math.cos(sceneData.frame.lat0 * Math.PI / 180),
+                    sy: 111320,
+                };
+                
+                baseElevation = (terrainMeta.min_elev + terrainMeta.max_elev) / 2;
+                
+                currentSite = {
+                    slug,
+                    ...sceneData.site,
+                    bestViewpoint: sceneData.best_viewpoint,
+                };
+                
+                rebuildTerrain(tex);
+                buildViewpointMarker();
+                updateSiteUI();
+                setDefaultCamera();
+                
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('attribution').textContent = sceneData.attribution?.join(' · ') || '';
+                
+                return currentSite;
+            } catch (e) {
+                console.error(`Failed to load site ${slug}:`, e);
+                document.getElementById('loading').textContent = `Error loading ${slug}`;
+                return null;
+            }
+        }
+
+        function rebuildTerrain(imagery) {
+            if (terrainMesh) {
+                world.remove(terrainMesh);
+                terrainMesh.geometry.dispose();
+                terrainMesh.material.dispose();
+            }
+            
+            const { rows, cols, left, top, resX, resY, heights } = terrain;
+            const [iw, is, ie, inn] = sceneData.imagery.bbox;
+            
+            const positions = new Float32Array(rows * cols * 3);
+            const uvs = new Float32Array(rows * cols * 2);
+            
+            for (let i = 0; i < rows; i++) {
+                const lat = top - (i + 0.5) * resY;
+                for (let j = 0; j < cols; j++) {
+                    const lon = left + (j + 0.5) * resX;
+                    const k = i * cols + j;
+                    const x = (lon - frame.lon0) * frame.sx;
+                    const y = heights[k] - baseElevation;
+                    const z = -(lat - frame.lat0) * frame.sy;
+                    positions[k * 3] = x;
+                    positions[k * 3 + 1] = y;
+                    positions[k * 3 + 2] = z;
+                    uvs[k * 2] = (lon - iw) / (ie - iw);
+                    uvs[k * 2 + 1] = (lat - is) / (inn - is);
+                }
+            }
+            
+            const indices = [];
+            for (let i = 0; i < rows - 1; i++) {
+                for (let j = 0; j < cols - 1; j++) {
+                    const a = i * cols + j, b = (i + 1) * cols + j, c = a + 1, d = b + 1;
+                    indices.push(a, b, c, b, d, c);
+                }
+            }
+            
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+            geometry.setIndex(indices);
+            geometry.computeVertexNormals();
+
+            imagery.colorSpace = THREE.SRGBColorSpace;
+            imagery.anisotropy = renderer.capabilities.getMaxAnisotropy();
+            
+            const material = new THREE.MeshLambertMaterial({ map: imagery, color: 0xffffff });
+            terrainMesh = new THREE.Mesh(geometry, material);
+            terrainMesh.receiveShadow = true;
+            world.add(terrainMesh);
+            
+            renderer.shadowMap.needsUpdate = true;
+        }
+
+        function buildViewpointMarker() {
+            if (viewpointMarker) {
+                world.remove(viewpointMarker);
+            }
+            
+            if (!currentSite?.bestViewpoint) return;
+            
+            const vp = currentSite.bestViewpoint;
+            const x = (vp.lon - frame.lon0) * frame.sx;
+            const y = vp.elevation_m - baseElevation + 5;
+            const z = -(vp.lat - frame.lat0) * frame.sy;
+            
+            const group = new THREE.Group();
+            
+            const mat = new THREE.MeshStandardMaterial({ color: 0xf9ca24, emissive: 0x443300 });
+            const pole = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 10, 8), mat);
+            pole.position.y = 5;
+            group.add(pole);
+            
+            const eye = new THREE.Mesh(new THREE.SphereGeometry(3, 16, 12),
+                new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x666666 }));
+            eye.position.y = 12;
+            group.add(eye);
+            
+            const label = document.createElement('div');
+            label.className = 'viewpoint-marker';
+            label.textContent = `Best VP: ${vp.visibility_pct?.toFixed(0) || '?'}% floor visible`;
+            const labelObj = new CSS2DObject(label);
+            labelObj.position.y = 18;
+            group.add(labelObj);
+            
+            group.position.set(x, y, z);
+            viewpointMarker = group;
+            world.add(viewpointMarker);
+        }
+
+        function updateSiteUI() {
+            if (!currentSite) return;
+            
+            document.getElementById('site-info').style.display = 'block';
+            document.getElementById('site-name').textContent = currentSite.name || currentSite.slug;
+            document.getElementById('site-prefecture').textContent = currentSite.prefecture || '';
+            
+            const m = currentSite.metrics || {};
+            document.getElementById('site-diameter').textContent = m.diameter_m ? `${m.diameter_m.toFixed(0)}m` : '-';
+            document.getElementById('site-relief').textContent = m.relief_m ? `${m.relief_m.toFixed(0)}m` : '-';
+            document.getElementById('site-floor-flat').textContent = m.floor_flat_pct ? `${m.floor_flat_pct.toFixed(0)}%` : '-';
+            
+            const slopes = m.rim_slope_range;
+            document.getElementById('site-rim-slopes').textContent = slopes ? 
+                `${slopes[0].toFixed(0)}° - ${slopes[1].toFixed(0)}°` : '-';
+            
+            document.getElementById('stat-lat').textContent = currentSite.lat?.toFixed(4) || '-';
+            document.getElementById('stat-lon').textContent = currentSite.lon?.toFixed(4) || '-';
+            document.getElementById('stat-min-elev').textContent = `${terrainMeta.min_elev.toFixed(0)}m`;
+            document.getElementById('stat-max-elev').textContent = `${terrainMeta.max_elev.toFixed(0)}m`;
+            document.getElementById('stat-relief').textContent = m.relief_m ? `${m.relief_m.toFixed(0)}m` : '-';
+            
+            document.getElementById('why-fits').textContent = currentSite.why_it_fits || '';
+            
+            document.getElementById('site-select').value = currentSite.slug;
+            document.title = `Track Lab - ${currentSite.name || currentSite.slug}`;
+        }
+
+        function sunDirection() {
+            const el = THREE.MathUtils.degToRad(SUN_ELEVATION_DEG);
+            const az = THREE.MathUtils.degToRad(SUN_AZIMUTH_DEG);
+            return new THREE.Vector3(Math.sin(az) * Math.cos(el), Math.sin(el), -Math.cos(az) * Math.cos(el));
+        }
+
+        function buildSkyAndLights() {
+            sky = new Sky();
+            sky.scale.setScalar(45000);
+            const u = sky.material.uniforms;
+            u.turbidity.value = 4;
+            u.rayleigh.value = 1.1;
+            u.mieCoefficient.value = 0.004;
+            u.mieDirectionalG.value = 0.8;
+            u.sunPosition.value.copy(sunDirection());
+            scene.add(sky);
+
+            scene.add(new THREE.HemisphereLight(0xcfe3ff, 0x4d5a36, 1.3));
+
+            sun = new THREE.DirectionalLight(0xfff0dd, 3.2);
+            sun.castShadow = true;
+            sun.shadow.mapSize.set(2048, 2048);
+            sun.shadow.bias = -0.0004;
+            scene.add(sun);
+            scene.add(sun.target);
+        }
+
+        function setShadowArea(center, halfSize) {
+            const cam = sun.shadow.camera;
+            cam.left = cam.bottom = -halfSize;
+            cam.right = cam.top = halfSize;
+            cam.near = 10;
+            cam.far = 8000;
+            cam.updateProjectionMatrix();
+            sun.target.position.copy(center);
+            sun.position.copy(center).addScaledVector(sunDirection(), 3000);
+            sun.target.updateMatrixWorld();
+            renderer.shadowMap.needsUpdate = true;
+        }
+
+        function setDefaultCamera() {
+            if (!terrain) return;
+            
+            const { rows, cols, left, top, resX, resY, heights } = terrain;
+            
+            let minX = Infinity, maxX = -Infinity;
+            let minZ = Infinity, maxZ = -Infinity;
+            
+            for (let i = 0; i < rows; i++) {
+                const lat = top - (i + 0.5) * resY;
+                for (let j = 0; j < cols; j++) {
+                    const lon = left + (j + 0.5) * resX;
+                    const x = (lon - frame.lon0) * frame.sx;
+                    const z = -(lat - frame.lat0) * frame.sy;
+                    minX = Math.min(minX, x);
+                    maxX = Math.max(maxX, x);
+                    minZ = Math.min(minZ, z);
+                    maxZ = Math.max(maxZ, z);
+                }
+            }
+            
+            const centerX = (minX + maxX) / 2;
+            const centerZ = (minZ + maxZ) / 2;
+            const size = Math.max(maxX - minX, maxZ - minZ);
+            const dist = size * 1.2;
+            
+            camera.position.set(centerX + dist * 0.6, dist * 0.5, centerZ + dist * 0.6);
+            controls.target.set(centerX, 0, centerZ);
+            controls.update();
+            
+            setShadowArea(new THREE.Vector3(centerX, 0, centerZ), size);
+            
+            atViewpoint = false;
+            document.getElementById('viewpoint-info').style.display = 'none';
+        }
+
+        function goToViewpoint() {
+            if (!currentSite?.bestViewpoint) return;
+            
+            const vp = currentSite.bestViewpoint;
+            const x = (vp.lon - frame.lon0) * frame.sx;
+            const y = vp.elevation_m - baseElevation + 2;
+            const z = -(vp.lat - frame.lat0) * frame.sy;
+            
+            camera.position.set(x, y + 50, z + 50);
+            controls.target.set(0, baseElevation - terrainMeta.min_elev, 0);
+            controls.update();
+            
+            atViewpoint = true;
+            document.getElementById('viewpoint-info').style.display = 'block';
+            document.getElementById('viewpoint-visibility').textContent = 
+                `${vp.visibility_pct?.toFixed(1) || '?'}%`;
+        }
+
+        async function init() {
+            await loadSitesIndex();
+            
+            const requestedSite = params.get('site');
+            
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(HAZE_COLOR, 0.00008);
+
+            const container = document.getElementById('canvas-container');
+            camera = new THREE.PerspectiveCamera(ORBIT_FOV, container.clientWidth / container.clientHeight, 1, 50000);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: params.has('capture') });
+            renderer.setSize(container.clientWidth, container.clientHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            renderer.toneMappingExposure = 0.75;
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            container.appendChild(renderer.domElement);
+
+            labelRenderer = new CSS2DRenderer();
+            labelRenderer.setSize(container.clientWidth, container.clientHeight);
+            labelRenderer.domElement.style.position = 'absolute';
+            labelRenderer.domElement.style.top = '0';
+            labelRenderer.domElement.style.pointerEvents = 'none';
+            container.appendChild(labelRenderer.domElement);
+
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.08;
+            controls.maxDistance = 5000;
+            controls.minDistance = 50;
+            controls.maxPolarAngle = Math.PI / 2 - 0.1;
+
+            world = new THREE.Group();
+            scene.add(world);
+            world.scale.y = 1.5;
+
+            buildSkyAndLights();
+            setupControls();
+
+            window.addEventListener('resize', onResize);
+
+            if (requestedSite) {
+                await loadSite(requestedSite);
+            } else if (sitesIndex.length > 0) {
+                await loadSite(sitesIndex[0].slug);
+            } else {
+                document.getElementById('loading').textContent = 'No sites available';
+            }
+
+            animate();
+            window.__ready = true;
+        }
+
+        function setupControls() {
+            const exagSlider = document.getElementById('exaggeration');
+            exagSlider.addEventListener('input', () => {
+                world.scale.y = parseFloat(exagSlider.value);
+                document.getElementById('exag-value').textContent = exagSlider.value + '×';
+                renderer.shadowMap.needsUpdate = true;
+            });
+            
+            document.getElementById('site-select').addEventListener('change', async (e) => {
+                if (e.target.value) {
+                    await loadSite(e.target.value);
+                    history.replaceState(null, '', `?site=${e.target.value}`);
+                }
+            });
+            
+            document.getElementById('btn-best-viewpoint').addEventListener('click', goToViewpoint);
+            document.getElementById('btn-overview').addEventListener('click', setDefaultCamera);
+        }
+
+        function onResize() {
+            const container = document.getElementById('canvas-container');
+            camera.aspect = container.clientWidth / container.clientHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(container.clientWidth, container.clientHeight);
+            labelRenderer.setSize(container.clientWidth, container.clientHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            sky.position.copy(camera.position);
+            renderer.render(scene, camera);
+            labelRenderer.render(scene, camera);
+        }
+
+        init();
+    </script>
+</body>
+</html>
