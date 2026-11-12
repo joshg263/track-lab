@@ -132,12 +132,11 @@
         .corner-label.visible { border-color: #00ffcc; color: #00ffcc; }
         .corner-label.hidden { border-color: #ff4444; color: #ff4444; opacity: 0.7; }
         .corner-label.start-finish {
-            background: linear-gradient(90deg, #fff 50%, #000 50%);
-            background-size: 8px 100%;
-            color: #000;
-            text-shadow: 0 0 2px #fff;
-            border: 2px solid #fff;
+            background: rgba(0, 0, 0, 0.9);
+            color: #f9ca24;
+            border: 2px solid #f9ca24;
             font-size: 11px;
+            padding: 3px 8px;
         }
     </style>
 </head>
@@ -245,9 +244,10 @@
 
         const TRACK_MARGIN = 400;
         const TRACK_WIDTH = 14;
+        const RIBBON_OFFSET = 5;
         const VISIBLE_COLOR = 0x00ffcc;
         const HIDDEN_COLOR = 0xff4444;
-        const OUTLINE_COLOR = 0x222222;
+        const OUTLINE_COLOR = 0x111111;
 
         async function init() {
             try {
@@ -276,7 +276,7 @@
                 50, container.clientWidth / container.clientHeight, 1, 20000
             );
             
-            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
             renderer.setSize(container.clientWidth, container.clientHeight);
             renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
             container.appendChild(renderer.domElement);
@@ -360,6 +360,40 @@
             controls.update();
         }
 
+        function sampleTerrainHeight(worldX, worldY, fallbackZ = null) {
+            const { rows, cols } = terrainData.grid;
+            const { width, height } = terrainData.size_m;
+            
+            const u = (worldX + width / 2) / width;
+            const v = (worldY + height / 2) / height;
+            
+            if (u < 0 || u > 1 || v < 0 || v > 1) {
+                return fallbackZ !== null ? fallbackZ : baseElevation;
+            }
+            
+            const col = u * (cols - 1);
+            const row = (1 - v) * (rows - 1);
+            
+            const col0 = Math.max(0, Math.min(cols - 2, Math.floor(col)));
+            const row0 = Math.max(0, Math.min(rows - 2, Math.floor(row)));
+            const col1 = col0 + 1;
+            const row1 = row0 + 1;
+            
+            const dc = col - col0;
+            const dr = row - row0;
+            
+            const heights = terrainData.heights;
+            const e00 = heights[row0][col0];
+            const e01 = heights[row0][col1];
+            const e10 = heights[row1][col0];
+            const e11 = heights[row1][col1];
+            
+            return e00 * (1 - dc) * (1 - dr) +
+                   e01 * dc * (1 - dr) +
+                   e10 * (1 - dc) * dr +
+                   e11 * dc * dr;
+        }
+
         function buildTerrain() {
             const { rows, cols } = terrainData.grid;
             const { width, height } = terrainData.size_m;
@@ -415,7 +449,6 @@
                     positions[vertIdx + 2] = (elev - baseElevation) * exag;
                     
                     const t = (elev - minElev) / range;
-                    
                     const slopeShade = 0.6 + 0.4 * (1 - t);
                     const baseHue = 0.22;
                     const baseSat = 0.25;
@@ -444,45 +477,35 @@
             const centerX = (clipMinX + clipMaxX) / 2;
             const centerY = (clipMinY + clipMaxY) / 2;
             terrainMesh.position.set(centerX, 0, -centerY);
+            terrainMesh.renderOrder = 0;
             
             scene.add(terrainMesh);
-            
-            addContourLines(clipMinX, clipMaxX, clipMinY, clipMaxY, minElev, maxElev, exag);
         }
 
-        function addContourLines(clipMinX, clipMaxX, clipMinY, clipMaxY, minElev, maxElev, exag) {
-            const contourInterval = 20;
-            const points = trackData.points;
-            
-            const startElev = Math.ceil(minElev / contourInterval) * contourInterval;
-            const endElev = Math.floor(maxElev / contourInterval) * contourInterval;
-            
-            const material = new THREE.LineBasicMaterial({ 
-                color: 0x444444, 
-                transparent: true, 
-                opacity: 0.3 
-            });
-            
-            for (let elev = startElev; elev <= endElev; elev += contourInterval) {
-                const z = (elev - baseElevation) * exag + 0.5;
-                const linePoints = [];
+        function densifyPoints(points, maxSpacing = 5) {
+            const dense = [];
+            for (let i = 0; i < points.length; i++) {
+                const p0 = points[i];
+                const p1 = points[(i + 1) % points.length];
                 
-                const radius = (clipMaxX - clipMinX) / 2;
-                const cx = (clipMinX + clipMaxX) / 2;
-                const cy = (clipMinY + clipMaxY) / 2;
+                const dx = p1.x - p0.x;
+                const dy = p1.y - p0.y;
+                const dz = p1.z - p0.z;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                const steps = Math.max(1, Math.ceil(dist / maxSpacing));
                 
-                for (let angle = 0; angle <= Math.PI * 2; angle += 0.1) {
-                    const x = cx + Math.cos(angle) * radius * 0.9;
-                    const y = cy + Math.sin(angle) * radius * 0.9;
-                    linePoints.push(new THREE.Vector3(x, z, -y));
-                }
-                
-                if (linePoints.length > 2) {
-                    const geometry = new THREE.BufferGeometry().setFromPoints(linePoints);
-                    const line = new THREE.Line(geometry, material);
-                    scene.add(line);
+                for (let s = 0; s < steps; s++) {
+                    const t = s / steps;
+                    dense.push({
+                        x: p0.x + dx * t,
+                        y: p0.y + dy * t,
+                        z: p0.z + dz * t,
+                        origIdx: i,
+                        t: t
+                    });
                 }
             }
+            return dense;
         }
 
         function buildTrack() {
@@ -492,67 +515,92 @@
             const points = trackData.points;
             const exag = parseFloat(document.getElementById('exaggeration').value);
             const halfWidth = TRACK_WIDTH / 2;
-            const outlineWidth = TRACK_WIDTH / 2 + 1.5;
-            const zOffset = 3;
+            const outlineWidth = TRACK_WIDTH / 2 + 2;
+            
+            const densePoints = densifyPoints(points, 8);
             
             const outlineVerts = [];
             const trackVerts = [];
             const trackColors = [];
-            const indices = [];
-            const outlineIndices = [];
             
-            for (let i = 0; i < points.length; i++) {
-                const p = points[i];
-                const pPrev = points[(i - 1 + points.length) % points.length];
-                const pNext = points[(i + 1) % points.length];
+            for (let i = 0; i < densePoints.length; i++) {
+                const dp = densePoints[i];
+                const dpPrev = densePoints[(i - 1 + densePoints.length) % densePoints.length];
+                const dpNext = densePoints[(i + 1) % densePoints.length];
                 
-                const dx = pNext.x - pPrev.x;
-                const dy = pNext.y - pPrev.y;
+                const dx = dpNext.x - dpPrev.x;
+                const dy = dpNext.y - dpPrev.y;
                 const len = Math.sqrt(dx * dx + dy * dy) || 1;
                 const nx = -dy / len;
                 const ny = dx / len;
                 
-                const z = (p.z - baseElevation) * exag + zOffset;
-                const zOutline = z - 0.5;
+                const centerElev = sampleTerrainHeight(dp.x, dp.y, dp.z);
+                const ribbonY = (centerElev - baseElevation) * exag + RIBBON_OFFSET;
+                
+                const leftX = dp.x + nx * outlineWidth;
+                const leftY = dp.y + ny * outlineWidth;
+                const rightX = dp.x - nx * outlineWidth;
+                const rightY = dp.y - ny * outlineWidth;
+                
+                const leftElev = sampleTerrainHeight(leftX, leftY, centerElev);
+                const rightElev = sampleTerrainHeight(rightX, rightY, centerElev);
+                const leftRibbonY = (Math.max(leftElev, centerElev) - baseElevation) * exag + RIBBON_OFFSET;
+                const rightRibbonY = (Math.max(rightElev, centerElev) - baseElevation) * exag + RIBBON_OFFSET;
                 
                 outlineVerts.push(
-                    p.x + nx * outlineWidth, zOutline, -(p.y + ny * outlineWidth),
-                    p.x - nx * outlineWidth, zOutline, -(p.y - ny * outlineWidth)
+                    leftX, leftRibbonY - 0.3, -leftY,
+                    rightX, rightRibbonY - 0.3, -rightY
                 );
+                
+                const trackLeftX = dp.x + nx * halfWidth;
+                const trackLeftY = dp.y + ny * halfWidth;
+                const trackRightX = dp.x - nx * halfWidth;
+                const trackRightY = dp.y - ny * halfWidth;
+                
+                const trackLeftElev = sampleTerrainHeight(trackLeftX, trackLeftY, centerElev);
+                const trackRightElev = sampleTerrainHeight(trackRightX, trackRightY, centerElev);
+                const trackLeftRibbonY = (Math.max(trackLeftElev, centerElev) - baseElevation) * exag + RIBBON_OFFSET;
+                const trackRightRibbonY = (Math.max(trackRightElev, centerElev) - baseElevation) * exag + RIBBON_OFFSET;
                 
                 trackVerts.push(
-                    p.x + nx * halfWidth, z, -(p.y + ny * halfWidth),
-                    p.x - nx * halfWidth, z, -(p.y - ny * halfWidth)
+                    trackLeftX, trackLeftRibbonY, -trackLeftY,
+                    trackRightX, trackRightRibbonY, -trackRightY
                 );
                 
-                const visible = currentVisibility ? currentVisibility[i] : true;
+                const origIdx = dp.origIdx;
+                const visible = currentVisibility ? currentVisibility[origIdx] : true;
                 const color = visible ? new THREE.Color(VISIBLE_COLOR) : new THREE.Color(HIDDEN_COLOR);
                 trackColors.push(color.r, color.g, color.b);
                 trackColors.push(color.r, color.g, color.b);
             }
             
-            for (let i = 0; i < points.length; i++) {
+            const indices = [];
+            const n = densePoints.length;
+            for (let i = 0; i < n; i++) {
                 const i0 = i * 2;
                 const i1 = i * 2 + 1;
-                const i2 = ((i + 1) % points.length) * 2;
-                const i3 = ((i + 1) % points.length) * 2 + 1;
+                const i2 = ((i + 1) % n) * 2;
+                const i3 = ((i + 1) % n) * 2 + 1;
                 
                 indices.push(i0, i2, i1);
                 indices.push(i1, i2, i3);
-                outlineIndices.push(i0, i2, i1);
-                outlineIndices.push(i1, i2, i3);
             }
             
             const outlineGeo = new THREE.BufferGeometry();
             outlineGeo.setAttribute('position', new THREE.Float32BufferAttribute(outlineVerts, 3));
-            outlineGeo.setIndex(outlineIndices);
+            outlineGeo.setIndex(indices);
             outlineGeo.computeVertexNormals();
             
             const outlineMat = new THREE.MeshBasicMaterial({ 
                 color: OUTLINE_COLOR, 
-                side: THREE.DoubleSide 
+                side: THREE.DoubleSide,
+                depthTest: false,
+                depthWrite: false,
+                transparent: true,
+                opacity: 0.9
             });
             const outlineMesh = new THREE.Mesh(outlineGeo, outlineMat);
+            outlineMesh.renderOrder = 10;
             trackGroup.add(outlineMesh);
             
             const trackGeo = new THREE.BufferGeometry();
@@ -563,17 +611,22 @@
             
             const trackMat = new THREE.MeshBasicMaterial({ 
                 vertexColors: true, 
-                side: THREE.DoubleSide 
+                side: THREE.DoubleSide,
+                depthTest: false,
+                depthWrite: false,
+                transparent: true,
+                opacity: 1.0
             });
             const trackMesh = new THREE.Mesh(trackGeo, trackMat);
+            trackMesh.renderOrder = 11;
             trackGroup.add(trackMesh);
             
-            addStartFinishLine(exag, zOffset);
+            addStartFinishLine(exag);
             
             scene.add(trackGroup);
         }
 
-        function addStartFinishLine(exag, zOffset) {
+        function addStartFinishLine(exag) {
             const points = trackData.points;
             const p0 = points[0];
             const p1 = points[1];
@@ -584,7 +637,8 @@
             const nx = -dy / len;
             const ny = dx / len;
             
-            const z = (p0.z - baseElevation) * exag + zOffset + 0.5;
+            const terrainElev = sampleTerrainHeight(p0.x, p0.y);
+            const z = (terrainElev - baseElevation) * exag + RIBBON_OFFSET + 0.5;
             const lineWidth = TRACK_WIDTH + 4;
             const lineDepth = 3;
             
@@ -609,10 +663,14 @@
             
             const material = new THREE.MeshBasicMaterial({ 
                 map: texture, 
-                side: THREE.DoubleSide 
+                side: THREE.DoubleSide,
+                depthTest: false,
+                depthWrite: false,
+                transparent: true
             });
             
             const sfLine = new THREE.Mesh(geometry, material);
+            sfLine.renderOrder = 12;
             
             const angle = Math.atan2(dy, dx);
             sfLine.rotation.x = -Math.PI / 2;
@@ -634,10 +692,11 @@
             
             const sfLabel = document.createElement('div');
             sfLabel.className = 'corner-label start-finish';
-            sfLabel.textContent = 'S/F';
+            sfLabel.textContent = '🏁 S/F';
             const sfObj = new CSS2DObject(sfLabel);
             const p0 = points[0];
-            sfObj.position.set(p0.x, (p0.z - baseElevation) * exag + 25, -p0.y);
+            const sfTerrainElev = sampleTerrainHeight(p0.x, p0.y);
+            sfObj.position.set(p0.x, (sfTerrainElev - baseElevation) * exag + 25, -p0.y);
             scene.add(sfObj);
             cornerLabels.push(sfObj);
             
@@ -663,9 +722,10 @@
                 label.textContent = `T${displayIdx + 1}`;
                 
                 const labelObj = new CSS2DObject(label);
+                const terrainElev = sampleTerrainHeight(closest.x, closest.y);
                 labelObj.position.set(
                     closest.x,
-                    (closest.z - baseElevation) * exag + 20,
+                    (terrainElev - baseElevation) * exag + 20,
                     -closest.y
                 );
                 labelObj.userData = { corner, displayIdx };
@@ -707,6 +767,8 @@
             const exag = parseFloat(document.getElementById('exaggeration').value);
             const group = new THREE.Group();
             
+            const terrainElev = sampleTerrainHeight(currentSeat.x, currentSeat.y);
+            
             const baseGeo = new THREE.CylinderGeometry(6, 10, 3, 16);
             const baseMat = new THREE.MeshPhongMaterial({ color: 0xf9ca24, emissive: 0x443300 });
             const base = new THREE.Mesh(baseGeo, baseMat);
@@ -728,7 +790,7 @@
             
             group.position.set(
                 currentSeat.x,
-                (currentSeat.ground_elevation_m - baseElevation) * exag,
+                (terrainElev - baseElevation) * exag,
                 -currentSeat.y
             );
             
@@ -883,35 +945,7 @@
         }
 
         function sampleTerrainElevation(worldX, worldZ) {
-            const { rows, cols } = terrainData.grid;
-            const { width, height } = terrainData.size_m;
-            
-            const u = (worldX + width / 2) / width;
-            const v = (-worldZ + height / 2) / height;
-            
-            if (u < 0 || u > 1 || v < 0 || v > 1) return null;
-            
-            const col = u * (cols - 1);
-            const row = (1 - v) * (rows - 1);
-            
-            const col0 = Math.floor(col);
-            const row0 = Math.floor(row);
-            const col1 = Math.min(col0 + 1, cols - 1);
-            const row1 = Math.min(row0 + 1, rows - 1);
-            
-            const dc = col - col0;
-            const dr = row - row0;
-            
-            const heights = terrainData.heights;
-            const e00 = heights[row0][col0];
-            const e01 = heights[row0][col1];
-            const e10 = heights[row1][col0];
-            const e11 = heights[row1][col1];
-            
-            return e00 * (1 - dc) * (1 - dr) +
-                   e01 * dc * (1 - dr) +
-                   e10 * (1 - dc) * dr +
-                   e11 * dc * dr;
+            return sampleTerrainHeight(worldX, -worldZ);
         }
 
         function worldToLatLon(worldX, worldZ) {
@@ -1036,10 +1070,11 @@
             if (!currentSeat || animatingCamera) return;
             
             const exag = parseFloat(document.getElementById('exaggeration').value);
+            const terrainElev = sampleTerrainHeight(currentSeat.x, currentSeat.y);
             
             const eyePos = new THREE.Vector3(
                 currentSeat.x,
-                (currentSeat.eye_elevation_m - baseElevation) * exag,
+                (terrainElev - baseElevation) * exag + currentSeat.eye_height_m * exag,
                 -currentSeat.y
             );
             

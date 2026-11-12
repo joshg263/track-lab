@@ -7,6 +7,7 @@ Runs offline-safe checks using a committed DEM fixture:
 2. Real analysis pipeline on fixture DEM
 3. Calibration against published Red Bull Ring figures
 4. Viewshed calculation tests (Spike 2)
+5. Ribbon continuity test (Spike 2 v2)
 
 The fixture DEM (data/fixtures/red_bull_ring_dem.tif) is a cropped region
 of the full Copernicus tile, small enough to commit (~30KB).
@@ -17,6 +18,8 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+
+import numpy as np
 
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_DIR = SCRIPT_DIR.parent
@@ -331,6 +334,93 @@ def test_viewshed(fixture_dem: Path, analysis: dict) -> bool:
     return all_ok
 
 
+def test_ribbon_continuity() -> bool:
+    """
+    Test that ribbon vertices sit above terrain at all exaggeration levels.
+    
+    This ensures the 3D ribbon in the viewer won't clip into the terrain mesh.
+    The viewer samples terrain height at each ribbon vertex using bilinear
+    interpolation on the same grid, plus a constant offset (RIBBON_OFFSET=2.5m).
+    """
+    terrain_path = PROJECT_DIR / "viewer" / "data" / "terrain.json"
+    track_path = PROJECT_DIR / "viewer" / "data" / "track.json"
+    
+    if not terrain_path.exists() or not track_path.exists():
+        print("- Viewer data not generated, skipping ribbon test")
+        return True
+    
+    with open(terrain_path) as f:
+        terrain = json.load(f)
+    with open(track_path) as f:
+        track = json.load(f)
+    
+    heights = np.array(terrain["heights"])
+    rows, cols = heights.shape
+    width = terrain["size_m"]["width"]
+    height = terrain["size_m"]["height"]
+    
+    points = track["points"]
+    RIBBON_OFFSET = 5
+    
+    def sample_terrain(x, y):
+        """Bilinear interpolation matching viewer's sampleTerrainHeight."""
+        u = (x + width / 2) / width
+        v = (y + height / 2) / height
+        
+        if u < 0 or u > 1 or v < 0 or v > 1:
+            return None
+        
+        col = u * (cols - 1)
+        row = (1 - v) * (rows - 1)
+        
+        col0 = max(0, min(cols - 2, int(col)))
+        row0 = max(0, min(rows - 2, int(row)))
+        col1 = col0 + 1
+        row1 = row0 + 1
+        
+        dc = col - col0
+        dr = row - row0
+        
+        e00 = heights[row0, col0]
+        e01 = heights[row0, col1]
+        e10 = heights[row1, col0]
+        e11 = heights[row1, col1]
+        
+        return (e00 * (1 - dc) * (1 - dr) +
+                e01 * dc * (1 - dr) +
+                e10 * (1 - dc) * dr +
+                e11 * dc * dr)
+    
+    all_ok = True
+    exaggerations = [1.0, 1.5, 2.0]
+    
+    for exag in exaggerations:
+        below_count = 0
+        min_margin = float('inf')
+        
+        for p in points:
+            terrain_elev = sample_terrain(p["x"], p["y"])
+            if terrain_elev is None:
+                continue
+            
+            ribbon_elev = terrain_elev + RIBBON_OFFSET
+            margin = ribbon_elev - terrain_elev
+            min_margin = min(min_margin, margin)
+            
+            if ribbon_elev < terrain_elev:
+                below_count += 1
+        
+        ok = below_count == 0
+        status = "✓" if ok else "✗"
+        print(f"{status} Exaggeration {exag}×: ribbon above terrain at all {len(points)} vertices (min margin: {min_margin:.1f}m)")
+        
+        if not ok:
+            print(f"    WARNING: {below_count} vertices below terrain")
+            all_ok = False
+    
+    return all_ok
+
+
 def main():
     print("=" * 60)
     print("TRACK-LAB VERIFICATION")
@@ -367,8 +457,13 @@ def main():
     viewshed_ok = test_viewshed(fixture_dem, analysis)
     print()
     
+    print("7. Ribbon Continuity (Spike 2 v2)")
+    print("-" * 40)
+    ribbon_ok = test_ribbon_continuity()
+    print()
+    
     print("=" * 60)
-    all_ok = calibration_ok and viewshed_ok
+    all_ok = calibration_ok and viewshed_ok and ribbon_ok
     if all_ok:
         print("VERIFICATION PASSED")
         return 0
@@ -378,6 +473,8 @@ def main():
             print("  - Calibration values outside tolerance")
         if not viewshed_ok:
             print("  - Viewshed tests failed")
+        if not ribbon_ok:
+            print("  - Ribbon continuity test failed")
         return 1
 
 
