@@ -189,11 +189,14 @@ def test_calibration(analysis: dict) -> bool:
     if not down_ok:
         all_ok = False
     
-    # Corner count sanity (not an official figure, just plausibility)
+    # Corner count check (Red Bull Ring officially has 10 turns, allow 8-11)
     corners = analysis.get("corners", [])
-    corner_ok = len(corners) >= 5
-    status = "✓" if corner_ok else "!"
-    print(f"{status} Corners detected: {len(corners)} (sanity check: ≥5)")
+    corner_count = len(corners)
+    corner_ok = 8 <= corner_count <= 11
+    status = "✓" if corner_ok else "✗"
+    print(f"{status} Corners detected: {corner_count} (official: 10 turns, acceptable: 8-11)")
+    if not corner_ok:
+        all_ok = False
     
     return all_ok
 
