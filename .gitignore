@@ -27,3 +27,6 @@ data/analysis.json
 
 # Test artifacts (fixture DEM is committed)
 data/fixtures/analysis_test.json
+
+# Hand-edit session log (local only, written by scripts/serve.py)
+logs/
