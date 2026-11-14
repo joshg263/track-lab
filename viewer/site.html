@@ -312,6 +312,7 @@
         let viewshedToken = 0;
         let viewshedTerrain = null;
         let editMode = false;
+        let layoutLoadToken = 0;
         let selectedIndex = -1;
         let dragging = false;
         let dragIndex = -1;
@@ -514,28 +515,34 @@
         }
 
         async function loadLayout(name) {
+            const token = ++layoutLoadToken;
             if (!name || !currentSite) {
                 clearLayout();
-                return;
+                return false;
             }
-            
+
             try {
+                const layout = await fetchLayoutJson(name);
+                if (token !== layoutLoadToken) return false;
                 currentLayoutKey = name;
-                currentLayout = await fetchLayoutJson(name);
-                originalPoints = clonePoints(currentLayout.control_points);
+                currentLayout = layout;
+                originalPoints = clonePoints(layout.control_points);
                 workingPoints = clonePoints(originalPoints);
                 undoStack = [];
                 selectedIndex = -1;
                 liveViewshedPct = null;
                 applyWorkingLayout();
-                
-                document.getElementById('layout-direction').textContent = currentLayout.direction || '';
-                document.getElementById('layout-direction').style.display = currentLayout.direction ? 'block' : 'none';
+
+                document.getElementById('layout-direction').textContent = layout.direction || '';
+                document.getElementById('layout-direction').style.display = layout.direction ? 'block' : 'none';
                 renderNotes();
                 updateEditButtons();
+                return true;
             } catch (e) {
+                if (token !== layoutLoadToken) return false;
                 console.error('Failed to load layout:', e);
                 clearLayout();
+                return false;
             }
         }
 
@@ -552,10 +559,7 @@
             liveViewshedPct = null;
             clearHandles();
             
-            if (trackGroup) {
-                world.remove(trackGroup);
-                trackGroup = null;
-            }
+            clearTrackRibbon();
             
             cornerLabels.forEach(l => { if (l.parent) l.parent.remove(l); });
             cornerLabels = [];
@@ -570,10 +574,26 @@
             return sampleZ(x, y);
         }
 
+        function disposeObjectResources(root) {
+            root.traverse(obj => {
+                if (obj.geometry) obj.geometry.dispose();
+                const materials = obj.material ? [].concat(obj.material) : [];
+                for (const mat of materials) {
+                    if (mat.map) mat.map.dispose();
+                    mat.dispose();
+                }
+            });
+        }
+
+        function clearTrackRibbon() {
+            if (!trackGroup) return;
+            if (trackGroup.parent) trackGroup.parent.remove(trackGroup);
+            disposeObjectResources(trackGroup);
+            trackGroup = null;
+        }
+
         function buildTrackRibbon() {
-            if (trackGroup) {
-                world.remove(trackGroup);
-            }
+            clearTrackRibbon();
             trackGroup = new THREE.Group();
             
             if (!layoutPoints || layoutPoints.length < 2) return;
@@ -1098,11 +1118,8 @@
 
         function clearHandles() {
             if (!handleGroup) return;
-            world.remove(handleGroup);
-            handleGroup.traverse(obj => {
-                if (obj.geometry) obj.geometry.dispose();
-                if (obj.material) obj.material.dispose();
-            });
+            if (handleGroup.parent) handleGroup.parent.remove(handleGroup);
+            disposeObjectResources(handleGroup);
             handleGroup = null;
         }
 
@@ -1537,13 +1554,14 @@
             document.getElementById('layout-select').addEventListener('change', async (e) => {
                 const from = currentLayoutKey || '';
                 const to = e.target.value || '';
-                if (editMode && from) {
-                    const ms = editStartedMs != null ? Date.now() - editStartedMs : 0;
-                    logEvent('edit_mode_off', { edit_mode_ms: ms }, from);
+                if (editMode && from && editStartedMs != null) {
+                    const ms = Date.now() - editStartedMs;
                     editStartedMs = null;
+                    logEvent('edit_mode_off', { edit_mode_ms: ms }, from);
                 }
                 if (from !== to) logEvent('layout_switch', { from, to }, to || from);
-                await loadLayout(to);
+                const accepted = await loadLayout(to);
+                if (!accepted || currentLayoutKey !== to) return;
                 if (editMode && to) {
                     editStartedMs = Date.now();
                     logEvent('edit_mode_on', {}, to);
