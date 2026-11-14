@@ -4,11 +4,16 @@
 GET is unchanged: the viewer directory, plus /data/sites/ mapped onto
 data/sites/.
 
+GET /api/layouts/edits?site=<slug>
+    JSON list of saved layout names in data/sites/<slug>/layouts/edits/.
+    index.json is not itself a layout. The static viewer can fall back to
+    that index when this endpoint is unavailable.
+
 POST /api/layouts/edits
     JSON body in the layout schema. Writes
     data/sites/nishiwaki_basin/layouts/edits/<name>.json so layout_check.py
-    can check it. Names are a single path segment; layouts A, B and C are
-    rejected so those files cannot be replaced.
+    can check it, and refreshes edits/index.json. Names are a single path
+    segment; layouts A, B and C are rejected so those files cannot be replaced.
 
 POST /api/session-events
     One event object, or a list. Appends JSON lines to logs/session-events.jsonl.
@@ -23,7 +28,7 @@ import os
 import re
 import socketserver
 import sys
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -41,6 +46,39 @@ RESERVED_NAMES = {
     "check_metrics",
 }
 MAX_BODY = 2_000_000
+DEFAULT_SITE = "nishiwaki_basin"
+
+
+def edits_directory(site):
+    """Absolute edits directory for a site slug, or None if the slug is unsafe."""
+    if not isinstance(site, str) or not NAME_RE.match(site):
+        return None
+    return os.path.join(SITES_DIR, site, "layouts", "edits")
+
+
+def list_edit_names(directory):
+    """Saved layout stems in directory, excluding the index and reserved names."""
+    if not directory or not os.path.isdir(directory):
+        return []
+    names = []
+    for fn in sorted(os.listdir(directory)):
+        if not fn.endswith(".json") or fn == "index.json":
+            continue
+        name = fn[:-5]
+        if NAME_RE.match(name) and name not in RESERVED_NAMES:
+            names.append(name)
+    return names
+
+
+def write_edits_index(directory):
+    """Refresh edits/index.json so a static server can list saved variants."""
+    os.makedirs(directory, exist_ok=True)
+    dest = os.path.join(directory, "index.json")
+    tmp = dest + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"edits": list_edit_names(directory)}, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, dest)
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -56,6 +94,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def end_headers(self):
         self.send_header("Cache-Control", "no-cache")
         super().end_headers()
+
+    def do_GET(self):
+        parsed = urlsplit(self.path)
+        if parsed.path == "/api/layouts/edits":
+            site = (parse_qs(parsed.query).get("site") or [DEFAULT_SITE])[0]
+            self._list_edits(site)
+            return
+        super().do_GET()
 
     def do_POST(self):
         path = urlsplit(self.path).path
@@ -132,8 +178,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             json.dump(payload, f, indent=2)
             f.write("\n")
         os.replace(tmp, dest)
+        write_edits_index(EDITS_DIR)
         rel = f"data/sites/nishiwaki_basin/layouts/edits/{name}.json"
         self._json(200, {"ok": True, "path": rel, "overwritten": overwritten})
+
+    def _list_edits(self, site):
+        directory = edits_directory(site)
+        if directory is None:
+            self._json(400, {"error": "invalid site"})
+            return
+        self._json(200, {"site": site, "edits": list_edit_names(directory)})
 
     def _append_events(self, body):
         events = body if isinstance(body, list) else [body]
@@ -177,6 +231,8 @@ class ThreadingServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 
 def main():
+    if os.path.isdir(EDITS_DIR):
+        write_edits_index(EDITS_DIR)
     with ThreadingServer(("", PORT), Handler) as httpd:
         print(f"Serving viewer at http://localhost:{PORT}")
         print(f"  Red Bull Ring: http://localhost:{PORT}/")

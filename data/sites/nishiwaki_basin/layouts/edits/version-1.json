@@ -1,0 +1,115 @@
+{
+  "name": "version-1",
+  "direction": "A long straight across the basin floor into a hairpin under the north rim",
+  "version": 1,
+  "track_width_m": 14.0,
+  "coordinate_system": "local_m",
+  "control_points": [
+    {
+      "x": 704.93,
+      "y": -390.2,
+      "note": "S/F - south flat"
+    },
+    {
+      "x": 1023.64,
+      "y": -576.15,
+      "note": "Main straight north"
+    },
+    {
+      "x": 987.23,
+      "y": -456.78
+    },
+    {
+      "x": 1065.71,
+      "y": -377.54,
+      "note": "Straight continues"
+    },
+    {
+      "x": 1016.91,
+      "y": -227.5,
+      "note": "Hairpin approach"
+    },
+    {
+      "x": 1137.19,
+      "y": -134.55,
+      "note": "Hairpin entry"
+    },
+    {
+      "x": 1238.34,
+      "y": 40.64,
+      "note": "Hairpin apex - far north"
+    },
+    {
+      "x": 1332.01,
+      "y": -119.22,
+      "note": "Hairpin exit - north flat"
+    },
+    {
+      "x": 1099.64,
+      "y": -480.12,
+      "note": "Turn 2 - still north flat"
+    },
+    {
+      "x": 1289.57,
+      "y": -617.83
+    },
+    {
+      "x": 1311.24,
+      "y": -798.12,
+      "note": "South transition - long jump"
+    },
+    {
+      "x": 1161.95,
+      "y": -897.1
+    },
+    {
+      "x": 985.49,
+      "y": -817.79
+    },
+    {
+      "x": 1128.91,
+      "y": -743.62
+    },
+    {
+      "x": 939.29,
+      "y": -624.05
+    },
+    {
+      "x": 806.67,
+      "y": -623.39
+    },
+    {
+      "x": 705.01,
+      "y": -549.85
+    },
+    {
+      "x": 299.65,
+      "y": -566.4
+    },
+    {
+      "x": 362.42,
+      "y": -472.11,
+      "note": "Turn 3 - south flat"
+    },
+    {
+      "x": 281.24,
+      "y": -362.14,
+      "note": "South section"
+    },
+    {
+      "x": 395.23,
+      "y": -196.32,
+      "note": "Return west"
+    },
+    {
+      "x": 489.32,
+      "y": -177.02
+    },
+    {
+      "x": 482.98,
+      "y": -356.0
+    }
+  ],
+  "notes": "First pass at a dragged layout",
+  "edited_from": "layout_a_straight_hairpin"
+}
