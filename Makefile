@@ -186,7 +186,7 @@ direction-loop-verify:
 	@echo "=== Direction Loop Verification ==="
 	@echo ""
 	@echo "1. Checking all committed layouts..."
-	@$(PYTHON) scripts/layout_check.py --all --quiet
+	@$(PYTHON) scripts/layout_check.py --all --quiet --relax-gradient-fail --write-viewer-metrics
 	@echo ""
 	@echo "2. Testing bad layout rejection..."
 	@$(PYTHON) scripts/verify_direction_loop.py

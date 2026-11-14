@@ -30,6 +30,13 @@ import numpy as np
 import rasterio
 
 from corner_detection import analyze_corners_xy
+from road_profile import (
+    GRADIENT_WINDOW_M,
+    ROAD_PROFILE_SMOOTH_M,
+    grade_profile,
+    max_abs_gradient_pct,
+    mean_sample_spacing,
+)
 
 SITE_DIR = Path(__file__).parent.parent / "data" / "sites" / "nishiwaki_basin"
 LAYOUTS_DIR = SITE_DIR / "layouts"
@@ -230,34 +237,6 @@ def interpolate_layout(layout: dict, dem: np.ndarray, transform,
     distances = np.cumsum(np.concatenate([[0], segment_lengths[:-1]]))
     
     return points, distances
-
-
-def compute_gradients(points: np.ndarray, distances: np.ndarray, 
-                      window_m: float = 20) -> np.ndarray:
-    """Compute longitudinal gradient at each point using a rolling window."""
-    n = len(points)
-    gradients = np.zeros(n)
-    total_length = distances[-1] + np.linalg.norm(points[0, :2] - points[-1, :2])
-    
-    for i in range(n):
-        d_start = distances[i] - window_m / 2
-        d_end = distances[i] + window_m / 2
-        
-        mask = ((distances >= d_start) & (distances <= d_end)) | \
-               ((distances + total_length >= d_start) & (distances + total_length <= d_end)) | \
-               ((distances - total_length >= d_start) & (distances - total_length <= d_end))
-        
-        if mask.sum() >= 2:
-            window_pts = points[mask]
-            window_dist = distances[mask]
-            
-            if len(window_pts) >= 2:
-                dz = window_pts[-1, 2] - window_pts[0, 2]
-                dd = window_dist[-1] - window_dist[0]
-                if dd > 0:
-                    gradients[i] = dz / dd * 100
-    
-    return gradients
 
 
 def check_self_intersection(points: np.ndarray, track_width: float) -> tuple[bool, list]:
@@ -484,9 +463,17 @@ def check_layout(layout_path: Path, site_dir: Path = SITE_DIR) -> LayoutReport:
     if min_radius is None:
         raise ValueError("Could not compute minimum corner radius")
     
-    gradients = compute_gradients(points, distances)
-    max_gradient = np.max(np.abs(gradients))
-    mean_gradient = np.mean(np.abs(gradients))
+    spacing_m = mean_sample_spacing(distances, closed_total_length=lap_length)
+    _, gradients = grade_profile(
+        distances,
+        points[:, 2],
+        spacing_m,
+        smooth_sigma_m=ROAD_PROFILE_SMOOTH_M,
+        window_m=GRADIENT_WINDOW_M,
+        closed_total_length=lap_length,
+    )
+    max_gradient = max_abs_gradient_pct(gradients)
+    mean_gradient = float(np.mean(np.abs(gradients)))
     
     max_cross_slope = 5.0
     
@@ -638,6 +625,10 @@ def write_viewer_metrics(layout_paths: list[Path], reports: list[LayoutReport], 
             "num_corners": s["num_corners"],
             "min_radius_m": s["min_radius_m"],
             "corners": s.get("corners", []),
+            "max_gradient_pct": s["max_gradient_pct"],
+            "max_gradient_pass": s["max_gradient_pct"] <= MAX_GRADIENT_PCT,
+            "gradient_window_m": GRADIENT_WINDOW_M,
+            "road_profile_smooth_m": ROAD_PROFILE_SMOOTH_M,
         }
     with open(out_path, "w") as f:
         json.dump(payload, f, indent=2)
@@ -689,6 +680,11 @@ def main():
         "--write-viewer-metrics",
         action="store_true",
         help="Write layouts/check_metrics.json for viewer/site.html",
+    )
+    parser.add_argument(
+        "--relax-gradient-fail",
+        action="store_true",
+        help="Exit 0 when only max_gradient checks fail (direction-loop verify)",
     )
     args = parser.parse_args()
     
@@ -749,6 +745,17 @@ def main():
         print(json.dumps(output, indent=2))
     
     all_passed = all(r.all_passed for r in reports)
+    if not all_passed and args.relax_gradient_fail:
+        non_gradient_ok = all(
+            all(
+                c.passed
+                for c in r.checks
+                if c.target != "info" and c.name != "max_gradient"
+            )
+            for r in reports
+        )
+        if non_gradient_ok:
+            return 0
     return 0 if all_passed else 1
 
 

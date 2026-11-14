@@ -17,7 +17,12 @@ from pathlib import Path
 import numpy as np
 import rasterio
 from pyproj import Geod
-from scipy.ndimage import gaussian_filter1d
+from road_profile import (
+    GRADIENT_WINDOW_M,
+    ROAD_PROFILE_SMOOTH_M,
+    grade_profile,
+    mean_sample_spacing,
+)
 
 from corner_detection import (
     RADIUS_THRESHOLD_M,
@@ -121,51 +126,16 @@ def compute_distances(coords: np.ndarray) -> tuple:
     return cumulative, np.array(segment_distances)
 
 
-def compute_gradients(distances: np.ndarray, elevations: np.ndarray, 
-                      window_m: float = 100) -> np.ndarray:
-    """
-    Compute gradient (%) at each point using a rolling window.
-    Positive = uphill, negative = downhill.
-    
-    Uses 100m window by default for stable gradient estimates
-    that match how gradients are typically reported for race tracks.
-    """
-    n = len(distances)
-    gradients = np.zeros(n)
-    
-    for i in range(n):
-        d0 = max(0, distances[i] - window_m / 2)
-        d1 = min(distances[-1], distances[i] + window_m / 2)
-        
-        i0 = np.searchsorted(distances, d0)
-        i1 = np.searchsorted(distances, d1)
-        i1 = min(i1, n - 1)
-        
-        if i1 > i0:
-            delta_elev = elevations[i1] - elevations[i0]
-            delta_dist = distances[i1] - distances[i0]
-            if delta_dist > 0:
-                gradients[i] = (delta_elev / delta_dist) * 100
-    
-    return gradients
-
-
-def smooth_elevations(elevations: np.ndarray, sigma: float = 2.0) -> np.ndarray:
-    """Apply Gaussian smoothing to reduce DEM noise in elevation profile."""
-    return gaussian_filter1d(elevations, sigma)
-
-
-def analyze(geojson_path: str, dem_paths: list, smooth_sigma: float = 2.0) -> dict:
+def analyze(
+    geojson_path: str,
+    dem_paths: list,
+    smooth_sigma_m: float = ROAD_PROFILE_SMOOTH_M,
+    gradient_window_m: float = GRADIENT_WINDOW_M,
+) -> dict:
     """Run full analysis and return results dict."""
     print(f"Loading centreline from {geojson_path}")
     coords = load_centreline(geojson_path)
     print(f"  {len(coords)} points")
-    
-    print("Sampling elevations from DEM...")
-    elevations_raw = sample_elevations(coords, dem_paths)
-    elevations = smooth_elevations(elevations_raw, smooth_sigma)
-    print(f"  Raw elevation range: {elevations_raw.min():.1f}m - {elevations_raw.max():.1f}m")
-    print(f"  Smoothed (σ={smooth_sigma}): {elevations.min():.1f}m - {elevations.max():.1f}m")
     
     print("Computing distances...")
     distances, segments = compute_distances(coords)
@@ -178,8 +148,22 @@ def analyze(geojson_path: str, dem_paths: list, smooth_sigma: float = 2.0) -> di
     total_length_closed = total_length + closing_gap
     print(f"  Total length: {total_length:.1f}m (+ {closing_gap:.1f}m closing gap = {total_length_closed:.1f}m)")
     
-    print("Computing gradients...")
-    gradients = compute_gradients(distances, elevations)
+    print("Sampling elevations from DEM...")
+    elevations_raw = sample_elevations(coords, dem_paths)
+    spacing_m = mean_sample_spacing(distances)
+    elevations, gradients = grade_profile(
+        distances,
+        elevations_raw,
+        spacing_m,
+        smooth_sigma_m=smooth_sigma_m,
+        window_m=gradient_window_m,
+    )
+    print(f"  Raw elevation range: {elevations_raw.min():.1f}m - {elevations_raw.max():.1f}m")
+    print(
+        f"  Graded profile (σ={smooth_sigma_m}m, {gradient_window_m:.0f}m gradient window): "
+        f"{elevations.min():.1f}m - {elevations.max():.1f}m"
+    )
+    
     max_up_idx = np.argmax(gradients)
     max_down_idx = np.argmin(gradients)
     
@@ -205,7 +189,8 @@ def analyze(geojson_path: str, dem_paths: list, smooth_sigma: float = 2.0) -> di
         "max_uphill_position_m": round(float(distances[max_up_idx]), 1),
         "max_downhill_gradient_pct": round(float(gradients[max_down_idx]), 2),
         "max_downhill_position_m": round(float(distances[max_down_idx]), 1),
-        "smoothing_sigma": smooth_sigma,
+        "road_profile_smooth_m": smooth_sigma_m,
+        "gradient_window_m": gradient_window_m,
         "corner_count": len(corners),
         "min_corner_radius_m": round(min_corner_radius, 1) if min_corner_radius else None,
         "corners": [
@@ -254,7 +239,10 @@ def print_results(results: dict):
     
     print(f"\nNote: Curvature computed with ±20m arc-length window.")
     print(f"      Corners: contiguous runs with R<{RADIUS_THRESHOLD_M:.0f}m, merged if gap<30m, dropped if <20m.")
-    print(f"      Elevations smoothed with σ={results['smoothing_sigma']} to reduce DEM noise.")
+    print(
+        f"      Gradients from graded profile (σ={results['road_profile_smooth_m']}m, "
+        f"{results['gradient_window_m']:.0f}m window)."
+    )
     print("=" * 60)
 
 
@@ -263,11 +251,26 @@ def main():
     parser.add_argument("geojson", help="Centreline GeoJSON file")
     parser.add_argument("dem", nargs="+", help="DEM GeoTIFF file(s)")
     parser.add_argument("--output", "-o", help="Output JSON file")
-    parser.add_argument("--smooth", type=float, default=2.0,
-                        help="Gaussian smoothing sigma for elevations (default: 2.0)")
+    parser.add_argument(
+        "--smooth-m",
+        type=float,
+        default=ROAD_PROFILE_SMOOTH_M,
+        help=f"Road profile low-pass σ in metres (default: {ROAD_PROFILE_SMOOTH_M})",
+    )
+    parser.add_argument(
+        "--gradient-window-m",
+        type=float,
+        default=GRADIENT_WINDOW_M,
+        help=f"Rolling gradient window in metres (default: {GRADIENT_WINDOW_M})",
+    )
     args = parser.parse_args()
     
-    results = analyze(args.geojson, args.dem, args.smooth)
+    results = analyze(
+        args.geojson,
+        args.dem,
+        smooth_sigma_m=args.smooth_m,
+        gradient_window_m=args.gradient_window_m,
+    )
     print_results(results)
     
     if args.output:
