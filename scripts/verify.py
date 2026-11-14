@@ -110,7 +110,6 @@ def run_analysis(fixture_dem: Path) -> dict:
         str(centreline),
         str(fixture_dem),
         "-o", str(output),
-        "--smooth", "3"
     ], capture_output=True, text=True)
     
     if result.returncode != 0:

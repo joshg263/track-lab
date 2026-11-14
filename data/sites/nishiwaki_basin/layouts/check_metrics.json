@@ -24,7 +24,11 @@
         "position_m": 4269.7,
         "radius_m": 96.3
       }
-    ]
+    ],
+    "max_gradient_pct": 31.5,
+    "max_gradient_pass": false,
+    "gradient_window_m": 100.0,
+    "road_profile_smooth_m": 15.0
   },
   "layout_b_elevation_sweep": {
     "layout_name": "layout_b_elevation_sweep",
@@ -39,7 +43,11 @@
         "position_m": 4272.8,
         "radius_m": 139.8
       }
-    ]
+    ],
+    "max_gradient_pct": 31.0,
+    "max_gradient_pass": false,
+    "gradient_window_m": 100.0,
+    "road_profile_smooth_m": 15.0
   },
   "layout_c_arena": {
     "layout_name": "layout_c_arena",
@@ -62,6 +70,10 @@
         "position_m": 4019.7,
         "radius_m": 108.6
       }
-    ]
+    ],
+    "max_gradient_pct": 35.5,
+    "max_gradient_pass": false,
+    "gradient_window_m": 100.0,
+    "road_profile_smooth_m": 15.0
   }
 }

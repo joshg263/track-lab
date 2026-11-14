@@ -55,6 +55,24 @@ def create_bad_layout_tight_radius():
         "notes": "Very tight hairpins that should fail radius check"
     }
 
+def create_bad_layout_steep_gradient():
+    """Layout along a steep corridor — should exceed 15% with honest grading."""
+    return {
+        "name": "test_steep_gradient",
+        "direction": "Test layout on steep central terrain",
+        "version": 1,
+        "track_width_m": 14,
+        "coordinate_system": "local_m",
+        "control_points": [
+            {"x": -200, "y": -800},
+            {"x": 200, "y": -800},
+            {"x": 200, "y": 400},
+            {"x": -200, "y": 400},
+        ],
+        "notes": "Crosses central high ground diagonally",
+    }
+
+
 def create_bad_layout_outside_bounds():
     """Create a layout that goes outside the DEM bounds."""
     return {
@@ -129,11 +147,15 @@ def main():
     if not test_bad_layout(create_bad_layout_self_crossing(), ["no_self_intersection"]):
         all_passed = False
     
-    print("\n2. Tight radius layout (<15m corners):")
+    print("\n2. Steep gradient layout (>15%):")
+    if not test_bad_layout(create_bad_layout_steep_gradient(), ["max_gradient"]):
+        all_passed = False
+
+    print("\n3. Tight radius layout (<15m corners):")
     if not test_bad_layout(create_bad_layout_tight_radius(), ["min_corner_radius"]):
         all_passed = False
     
-    print("\n3. Outside bounds layout:")
+    print("\n4. Outside bounds layout:")
     if not test_bad_layout(create_bad_layout_outside_bounds(), ["inside_bounds"]):
         all_passed = False
     
