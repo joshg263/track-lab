@@ -67,7 +67,7 @@ The checker (`scripts/layout_check.py`) validates layouts against rough F1-style
 |-------|--------|-------|
 | Lap length | 3.5–4.5 km | Measured along spline centerline |
 | Min corner radius | ≥15 m | Smallest radius in any corner |
-| Max gradient | ≤12% | Longitudinal slope over 20m window |
+| Max gradient | ≤12% | Graded road profile (15m σ) over 100m window (`scripts/road_profile.py`) |
 | Max cross-slope | ≤8% | Track banking (simplified) |
 | No self-intersection | None | Track cannot cross itself |
 | Inside bounds | 100% | All points within DEM extent |
@@ -99,7 +99,7 @@ Check                     Status   Value           Target
 ----------------------------------------------------------------------
 lap_length                ✓        4299.0          3500-4500 m
 min_corner_radius         ✓        36.6            ≥15 m
-max_gradient              ✗        43.8            ≤12%
+max_gradient              ✗        31.5            ≤12%
 ```
 
 ### 2. Interpret the Failure
