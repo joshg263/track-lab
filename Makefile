@@ -165,7 +165,7 @@ site-scout-screenshots:
 # AI Direction Loop (Spike 5)
 # ============================================================
 
-.PHONY: layout-check layout-check-all layout-verify direction-loop-verify
+.PHONY: layout-check layout-check-all layout-verify direction-loop-verify layout-math-verify
 
 # Check a single layout
 # Usage: make layout-check LAYOUT=data/sites/nishiwaki_basin/layouts/layout_a.json
@@ -191,4 +191,12 @@ direction-loop-verify:
 	@echo "2. Testing bad layout rejection..."
 	@$(PYTHON) scripts/verify_direction_loop.py
 	@echo ""
+	@echo "3. JS layout maths agrees with the Python checker..."
+	@$(PYTHON) scripts/verify_layout_math.py
+	@echo ""
 	@echo "All direction loop checks passed!"
+
+# JS corner + gradient maths vs check_metrics.json and Red Bull Ring analysis
+layout-math-verify:
+	@echo "Checking JS layout maths against Python..."
+	@$(PYTHON) scripts/verify_layout_math.py
