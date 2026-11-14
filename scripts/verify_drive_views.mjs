@@ -37,6 +37,27 @@ if (!index.edits?.includes('version-1')) {
 }
 console.log('edits api', edits.edits.join(','));
 
+const indexSave = await fetch(`${base}/api/layouts/edits`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+        name: 'index',
+        coordinate_system: 'local_m',
+        control_points: [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 0, y: 10 }],
+    }),
+});
+if (indexSave.status !== 400) {
+    throw new Error('saving a variant named index should be rejected, got ' + indexSave.status);
+}
+const indexAfter = await (await fetch(`${base}/data/sites/nishiwaki_basin/layouts/edits/index.json`)).json();
+if (!Array.isArray(indexAfter.edits) || indexAfter.edits.includes('index') || indexAfter.control_points) {
+    throw new Error('index.json was overwritten by a layout save: ' + JSON.stringify(indexAfter));
+}
+if (!indexAfter.edits.includes('version-1')) {
+    throw new Error('index.json lost version-1: ' + JSON.stringify(indexAfter));
+}
+console.log('reserved name index rejected');
+
 const browser = await chromium.launch({
     channel: 'chrome',
     headless: true,

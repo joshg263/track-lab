@@ -393,6 +393,7 @@
             'layout_b_elevation_sweep',
             'layout_c_arena',
             'check_metrics',
+            'index',
         ]);
 
         const ORBIT_FOV = 50;
@@ -605,6 +606,9 @@
         }
 
         async function fetchLayoutJson(name) {
+            if (name === 'index' || name === 'check_metrics') {
+                throw new Error(`Layout not found: ${name}`);
+            }
             const base = `${SITES_BASE}/${currentSite.slug}/layouts`;
             const edited = !RESERVED_LAYOUTS.has(name);
             const urls = edited
@@ -1417,7 +1421,9 @@
             let name = slugify(document.getElementById('variant-name').value);
             if (!name) name = 'edit_' + Date.now();
             if (RESERVED_LAYOUTS.has(name)) {
-                document.getElementById('save-status').textContent = 'Pick a new name. Layouts A, B and C stay as they are.';
+                document.getElementById('save-status').textContent = name === 'index'
+                    ? 'Pick a new name. index is reserved for the edits list.'
+                    : 'Pick a new name. Layouts A, B and C stay as they are.';
                 return;
             }
             const note = document.getElementById('session-note').value.trim();

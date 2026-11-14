@@ -44,6 +44,8 @@ RESERVED_NAMES = {
     "layout_b_elevation_sweep",
     "layout_c_arena",
     "check_metrics",
+    # edits/index.json is the manifest, not a layout.
+    "index",
 }
 MAX_BODY = 2_000_000
 DEFAULT_SITE = "nishiwaki_basin"
