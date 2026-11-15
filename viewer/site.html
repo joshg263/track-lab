@@ -170,6 +170,13 @@
         #profile-legend { display: flex; gap: 10px; margin-top: 4px; font-size: 10px; color: #aaa; }
         #profile-legend i { display: inline-block; width: 10px; height: 8px; margin-right: 3px; vertical-align: middle; }
         #profile-note { font-size: 10px; color: #aaa; line-height: 1.35; margin-top: 4px; }
+        #runoff-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 8px; }
+        #runoff-grid label { font-size: 11px; margin: 2px 0; }
+        #runoff-grid input[type="number"] {
+            width: 58px; background: #333; color: #eee; border: 1px solid #555;
+            border-radius: 4px; padding: 3px 4px; font-family: monospace; font-size: 11px;
+        }
+        .runoff-note { font-size: 10px; color: #999; line-height: 1.35; margin: 2px 0 6px; }
         #lap-estimate { font-size: 11px; color: #f9ca24; margin-top: 3px; font-family: monospace; }
         #car-settings { margin-top: 8px; }
         #car-settings .car-note { font-size: 10px; color: #999; line-height: 1.35; }
@@ -340,6 +347,17 @@
         <label><input type="checkbox" id="show-layout" checked> Show layout ribbon</label>
         <label><input type="checkbox" id="show-racing-line" checked> Racing line</label>
         <label><input type="checkbox" id="show-labels" checked> Show corner labels</label>
+
+        <h3>Run-off zones</h3>
+        <p class="runoff-note">Starting estimate, not an FIA figure. Depth is v²/(2a) from the entry speed. Gravel default is 0.5 g; tarmac is about 0.9 g.</p>
+        <label><input type="checkbox" id="show-runoff" checked> Show run-off zones</label>
+        <div id="runoff-grid">
+            <label>Decel <input id="runoff-decel" type="number" min="0.2" max="1.5" step="0.1" value="0.5"> g</label>
+            <label>Width <input id="runoff-width" type="number" min="10" max="200" step="5" value="50"> m</label>
+            <label>Slope <input id="runoff-slope" type="number" min="1" max="30" step="1" value="10"> %</label>
+            <label>Step <input id="runoff-step" type="number" min="0.5" max="20" step="0.5" value="3"> m</label>
+        </div>
+        <p class="runoff-note">Green passes the terrain check. Red fails it.</p>
     </div>
 
     <div id="stats" class="panel">
@@ -395,6 +413,7 @@
             stepOnboardLook,
         } from './drive_profile.js';
         import { Terrain, computeViewshed } from './viewshed.js';
+        import { assessRunoff } from './runoff.js';
 
         const params = new URLSearchParams(location.search);
         if (params.get('profile') === 'terrain') {
@@ -452,6 +471,8 @@
         let lookReady = false;
         let horizonSteady = false;
         let driveProfile = null;
+        let runoffReport = null;
+        let runoffGroup = null;
         let heliOrbit = 0.55;
         let savedOrbit = null;
         let carMarker = null;
@@ -748,6 +769,8 @@
             liveMetrics = null;
             verticalProfile = null;
             driveProfile = null;
+            runoffReport = null;
+            clearRunoffZones();
             originalPoints = null;
             workingPoints = null;
             undoStack = [];
@@ -880,6 +903,7 @@
             
             addStartFinishLine();
             addRacingLine(eye, lift);
+            addRunoffZones(eye);
             
             trackGroup.visible = document.getElementById('show-layout').checked;
             world.add(trackGroup);
@@ -914,6 +938,92 @@
                 sampleZ: designed ? null : sampleZ,
                 ...readCarInputs(),
             });
+        }
+
+        function readRunoffOptions() {
+            const num = (id, fallback) => {
+                const v = parseFloat(document.getElementById(id)?.value);
+                return Number.isFinite(v) ? v : fallback;
+            };
+            return {
+                decelG: num('runoff-decel', 0.5),
+                widthM: num('runoff-width', 50),
+                slopeLimit: num('runoff-slope', 10) / 100,
+                stepM: num('runoff-step', 3),
+            };
+        }
+
+        function rebuildRunoff() {
+            runoffReport = null;
+            if (!layoutPoints || !liveMetrics || layoutPoints.length < 8) return;
+            const designZ = verticalProfile?.design_at_points
+                ? verticalProfile.design_at_points
+                : layoutPoints.map((p) => p.terrainZ ?? p.z);
+            const trace = driveProfile
+                ? driveProfile.samples.map((s) => ({ distance: s.distance, speed_mps: s.speedMps }))
+                : null;
+            const options = readRunoffOptions();
+            runoffReport = assessRunoff(
+                layoutPoints.map((p) => p.x),
+                layoutPoints.map((p) => p.y),
+                layoutPoints.map((p) => p.distance),
+                designZ,
+                liveMetrics.lapLengthM,
+                sampleZ,
+                {
+                    trackWidthM: trackWidthM(),
+                    speedTrace: trace,
+                    decelG: options.decelG,
+                    widthM: options.widthM,
+                    slopeLimit: options.slopeLimit,
+                    stepM: options.stepM,
+                },
+            );
+        }
+
+        function clearRunoffZones() {
+            if (!runoffGroup) return;
+            if (runoffGroup.parent) runoffGroup.parent.remove(runoffGroup);
+            disposeObjectResources(runoffGroup);
+            runoffGroup = null;
+        }
+
+        function addRunoffZones(eye) {
+            clearRunoffZones();
+            if (!runoffReport || !world || !document.getElementById('show-runoff')?.checked) return;
+            runoffGroup = new THREE.Group();
+            const lift = eye ? 0.45 : 0.8;
+            for (const corner of runoffReport.corners) {
+                const poly = corner.polygon;
+                if (!poly || poly.length < 4) continue;
+                const verts = [];
+                for (const pair of poly) {
+                    const x = pair[0];
+                    const y = pair[1];
+                    const elev = meshElevation(x, y);
+                    verts.push(x, elev - baseElevation + lift, -y);
+                }
+                const geo = new THREE.BufferGeometry();
+                geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+                geo.setIndex([0, 1, 2, 0, 2, 3]);
+                geo.computeVertexNormals();
+                const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+                    color: corner.passed ? 0x1f9d55 : 0xd64545,
+                    side: THREE.DoubleSide,
+                    depthTest: true,
+                    depthWrite: false,
+                    transparent: true,
+                    opacity: 0.72,
+                    fog: eye,
+                    toneMapped: false,
+                    polygonOffset: true,
+                    polygonOffsetFactor: -2,
+                    polygonOffsetUnits: -2,
+                }));
+                mesh.renderOrder = 9;
+                runoffGroup.add(mesh);
+            }
+            world.add(runoffGroup);
         }
 
         function addRacingLine(eye, lift) {
@@ -1091,6 +1201,12 @@
                   value: works ? `${Math.round(works.cut_m3)} / ${Math.round(works.fill_m3)} m³` : '—',
                   pass: true, target: 'info' },
                 { id: 'viewshed', name: 'Visible lap', value: viewshedText, pass: true, target: 'info' },
+                { id: 'runoff', name: 'Run-off',
+                  value: runoffReport && runoffReport.corner_count
+                    ? `${runoffReport.pass_count}/${runoffReport.corner_count} corners pass`
+                    : '—',
+                  pass: !runoffReport || runoffReport.pass_count === runoffReport.corner_count,
+                  target: runoffReport && runoffReport.corner_count ? 'starting estimate' : 'info' },
                 { id: 'elev', name: 'Elev range', value: `${elevRange.toFixed(0)} m`,
                   pass: true, target: 'info' },
             ];
@@ -2171,6 +2287,7 @@
             }
             blendEarthworksIntoHeights();
             rebuildDriveProfile();
+            rebuildRunoff();
             buildTrackRibbon();
             buildCornerLabels();
             updateLayoutUI();
@@ -3651,6 +3768,19 @@
                         note: document.getElementById('profile-note')?.textContent || '',
                     };
                 },
+                runoffSummary() {
+                    if (!runoffReport) return null;
+                    const cell = document.querySelector('[data-check="runoff"] td:last-child');
+                    return {
+                        summary: runoffReport.summary,
+                        passCount: runoffReport.pass_count,
+                        cornerCount: runoffReport.corner_count,
+                        decelG: runoffReport.decel_g,
+                        estimate: runoffReport.estimate,
+                        line: cell ? cell.textContent : '',
+                        zoneCount: runoffGroup ? runoffGroup.children.length : 0,
+                    };
+                },
                 profileSummary() {
                     if (!driveProfile) return null;
                     const here = sampleProfile(driveProfile, driveDistance);
@@ -3685,7 +3815,7 @@
                     updateEditButtons();
                     return true;
                 },
-                frameTrack() {
+                frameTrack(padding = 0.95) {
                     if (!layoutPoints?.length || !camera || !controls) return;
                     if (cameraMode !== 'orbit') enterOrbit(false);
                     let minX = Infinity;
@@ -3701,8 +3831,8 @@
                     const cx = (minX + maxX) / 2;
                     const cz = -((minY + maxY) / 2);
                     const size = Math.max(maxX - minX, maxY - minY, 200);
-                    const dist = size * 0.95;
-                    camera.position.set(cx + dist * 0.08, dist * 0.7, cz + dist * 0.38);
+                    const dist = size * (Number.isFinite(padding) ? padding : 0.95);
+                    camera.position.set(cx + dist * 0.02, dist * 0.85, cz + dist * 0.22);
                     controls.target.set(cx, 0, cz);
                     controls.update();
                     setShadowArea(new THREE.Vector3(cx, 0, cz), size);
@@ -3827,6 +3957,17 @@
             document.getElementById('show-racing-line').addEventListener('change', () => {
                 if (layoutPoints) buildTrackRibbon();
             });
+            document.getElementById('show-runoff').addEventListener('change', () => {
+                if (layoutPoints) buildTrackRibbon();
+            });
+            for (const id of ['runoff-decel', 'runoff-width', 'runoff-slope', 'runoff-step']) {
+                document.getElementById(id).addEventListener('change', () => {
+                    if (!layoutPoints) return;
+                    rebuildRunoff();
+                    buildTrackRibbon();
+                    updateLayoutUI();
+                });
+            }
             document.getElementById('horizon-steady').addEventListener('change', (e) => {
                 horizonSteady = e.target.checked;
                 lookReady = false;
@@ -3836,7 +3977,9 @@
                 document.getElementById(id).addEventListener('change', () => {
                     if (!layoutPoints) return;
                     rebuildDriveProfile();
+                    rebuildRunoff();
                     buildTrackRibbon();
+                    updateLayoutUI();
                     updateCarMarker();
                     if (cameraMode !== 'orbit') {
                         lookReady = false;

@@ -365,6 +365,10 @@ export function findCorners(curvature, distances, options = {}) {
         }
         if (!(minRadius < Infinity)) continue;
         corners.push({
+            startIndex: start,
+            endIndex: end,
+            startM: distances[start],
+            endM: distances[end],
             positionM: (distances[start] + distances[end]) / 2,
             radiusM: minRadius,
         });
@@ -396,6 +400,7 @@ export function analyzeCornersXY(xy, distances, options = {}) {
         curvature,
         radius,
         corners,
+        runs: corners,
         cornersDict: corners.map(c => ({ position_m: c.positionM, radius_m: c.radiusM })),
         cornerCount: corners.length,
         minRadiusM,
