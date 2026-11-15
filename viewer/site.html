@@ -956,6 +956,8 @@
         function rebuildRunoff() {
             runoffReport = null;
             if (!layoutPoints || !liveMetrics || layoutPoints.length < 8) return;
+            // The designed deck is flat from centreline to road edge, so the
+            // drop and wall check uses this z(s), not a mesh sample at the edge.
             const designZ = verticalProfile?.design_at_points
                 ? verticalProfile.design_at_points
                 : layoutPoints.map((p) => p.terrainZ ?? p.z);

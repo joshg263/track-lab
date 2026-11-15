@@ -36,6 +36,8 @@ from layout_check import (  # noqa: E402
 )
 from runoff import (  # noqa: E402
     GRAVITY_MPS2,
+    _interp_closed,
+    _point_in_polygon,
     assess_runoff,
 )
 from vertical_profile import build_vertical_profile  # noqa: E402
@@ -257,6 +259,122 @@ def check_flat_and_cliff(skip_js: bool) -> None:
     compare(cliff_py, cliff_js, "cliff")
 
 
+def _zone_ground(distances, design, lap, zones, turn_in_only: bool):
+    """Terrain that sits on the designed edge, or on the turn-in height only."""
+
+    def height(x, y):
+        for zone in zones:
+            poly = zone["polygon"]
+            if not _point_in_polygon(x, y, poly):
+                continue
+            if turn_in_only:
+                return float(_interp_closed(distances, design, lap, zone["turn_in_m"]))
+            ax, ay = poly[0]
+            bx, by = poly[1]
+            dx, dy = poly[3]
+            ux, uy = bx - ax, by - ay
+            vx, vy = dx - ax, dy - ay
+            det = ux * vy - uy * vx
+            if abs(det) < 1e-9:
+                u = 0.0
+            else:
+                u = ((x - ax) * vy - (y - ay) * vx) / det
+            if u < 0.0:
+                u = 0.0
+            elif u > 1.0:
+                u = 1.0
+            return float(_interp_closed(
+                distances, design, lap, zone["turn_in_m"] + u * zone["width_m"],
+            ))
+        return 100.0
+
+    return height
+
+
+def _zones_spec(distances, design, lap, zones, mode: str) -> dict:
+    return {
+        "kind": "zones",
+        "distances": distances.tolist(),
+        "designZ": np.asarray(design, dtype=np.float64).tolist(),
+        "lapM": lap,
+        "mode": mode,
+        "zones": [
+            {
+                "polygon": zone["polygon"],
+                "turnInM": zone["turn_in_m"],
+                "widthM": zone["width_m"],
+            }
+            for zone in zones
+        ],
+    }
+
+
+def check_designed_edge(skip_js: bool) -> None:
+    """Drop and wall use the designed road-edge height, which is z(s)."""
+    xy, distances, lap = stadium()
+
+    def terrain(_x, _y):
+        return 100.0
+
+    raised_design = np.full(len(xy), 108.0)
+    raised = assess_runoff(
+        xy[:, 0], xy[:, 1], distances, raised_design, lap, terrain, track_width_m=14,
+    )
+    if raised["pass_count"] != 0:
+        fail(f"an edge 8 m above the ground should fail, got {raised['summary']}")
+    for corner in raised["corners"]:
+        if corner["reasons"] != ["drop"]:
+            fail(f"raised edge corner {corner['index']} reasons {corner['reasons']}")
+        if abs(corner["z_edge_m"] - 108.0) > 1e-6:
+            fail(f"z_edge {corner['z_edge_m']} is not the designed height 108 m")
+        if abs(corner["max_drop_m"] - 8.0) > 0.05:
+            fail(f"drop {corner['max_drop_m']} m should be the 8 m designed step")
+    print(f"designed edge: {raised['summary']}, each an 8 m drop below z(s)")
+
+    design = 100.0 + 0.08 * distances
+    probe = assess_runoff(
+        xy[:, 0], xy[:, 1], distances, design, lap, terrain,
+        track_width_m=14, slope_limit=1.0,
+    )
+    zones = probe["corners"]
+    matched = assess_runoff(
+        xy[:, 0], xy[:, 1], distances, design, lap,
+        _zone_ground(distances, design, lap, zones, False),
+        track_width_m=14, slope_limit=1.0,
+    )
+    if matched["pass_count"] != matched["corner_count"]:
+        detail = [(c["index"], c["reasons"], c["max_drop_m"], c["max_wall_m"]) for c in matched["corners"]]
+        fail(f"terrain on the designed edge should pass, got {detail}")
+    held = assess_runoff(
+        xy[:, 0], xy[:, 1], distances, design, lap,
+        _zone_ground(distances, design, lap, zones, True),
+        track_width_m=14, slope_limit=1.0,
+    )
+    for corner in held["corners"]:
+        if "drop" not in corner["reasons"] and "wall" not in corner["reasons"]:
+            fail(
+                f"terrain held at the turn-in height should miss the rising edge, "
+                f"corner {corner['index']} {corner['reasons']}"
+            )
+    print("designed edge follows z(s) along the outside edge")
+
+    if skip_js:
+        return
+    compare(raised, run_js("assess", payload_from(
+        xy, distances, raised_design, lap, {"kind": "constant", "z": 100},
+    )), "raised-edge")
+    compare(matched, run_js("assess", payload_from(
+        xy, distances, design, lap,
+        _zones_spec(distances, design, lap, zones, "along"),
+        slope_limit=1.0,
+    )), "edge-along")
+    compare(held, run_js("assess", payload_from(
+        xy, distances, design, lap,
+        _zones_spec(distances, design, lap, zones, "turn-in"),
+        slope_limit=1.0,
+    )), "edge-turn-in")
+
+
 def check_overlap(skip_js: bool) -> None:
     xy, distances, lap = overlap_track()
     design = np.full(len(xy), 50.0)
@@ -405,6 +523,7 @@ def main() -> int:
     if shutil.which("node") is None and not skip_js:
         fail("node not found: install Node.js 18+ or set SKIP_JS_PARITY=1")
     check_flat_and_cliff(skip_js)
+    check_designed_edge(skip_js)
     check_overlap(skip_js)
     check_trace_changes_depth(skip_js)
     print("fitting layouts...")

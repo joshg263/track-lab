@@ -59,33 +59,75 @@ function groundFromSpec(spec, sampleZ) {
         return (x, y) => ((axis === 'x' ? x : y) > cut ? low : high);
     }
     if (spec.kind === 'dem') return sampleZ;
+    if (spec.kind === 'zones') return zoneGround(spec);
     throw new Error('unknown ground ' + spec.kind);
 }
 
-// Nearest centreline design elevation. Matches the viewer's deckElevation.
-function deckElevation(points, x, y) {
-    const n = points.length;
-    let best = Infinity;
-    let bestZ = points[0].z;
-    for (let i = 0; i < n; i++) {
-        const j = (i + 1) % n;
-        const ax = points[i].x;
-        const ay = points[i].y;
-        const dx = points[j].x - ax;
-        const dy = points[j].y - ay;
-        const len2 = dx * dx + dy * dy;
-        let t = len2 > 1e-8 ? ((x - ax) * dx + (y - ay) * dy) / len2 : 0;
-        if (t < 0) t = 0;
-        else if (t > 1) t = 1;
-        const px = ax + dx * t;
-        const py = ay + dy * t;
-        const d2 = (x - px) * (x - px) + (y - py) * (y - py);
-        if (d2 < best) {
-            best = d2;
-            bestZ = points[i].z + (points[j].z - points[i].z) * t;
-        }
+function pointInPolygon(x, y, poly) {
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const xi = poly[i][0];
+        const yi = poly[i][1];
+        const xj = poly[j][0];
+        const yj = poly[j][1];
+        const hit = ((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / ((yj - yi) || 1e-12) + xi);
+        if (hit) inside = !inside;
     }
-    return bestZ;
+    return inside;
+}
+
+function zoneGround(spec) {
+    const distances = spec.distances;
+    const designZ = spec.designZ;
+    const lapM = spec.lapM;
+    const zones = spec.zones || [];
+    const turnInOnly = spec.mode === 'turn-in';
+    const interp = (distanceM) => {
+        const n = distances.length;
+        let d = distanceM % lapM;
+        if (d < 0) d += lapM;
+        let lo = 0;
+        let hi = n - 1;
+        while (lo < hi) {
+            const mid = (lo + hi + 1) >> 1;
+            if (distances[mid] <= d) lo = mid;
+            else hi = mid - 1;
+        }
+        const i = lo;
+        const d0 = distances[i];
+        const d1 = i + 1 >= n ? lapM : distances[i + 1];
+        const v1 = i + 1 >= n ? designZ[0] : designZ[i + 1];
+        const span = d1 - d0;
+        let t = 0;
+        if (span > 1e-9) {
+            t = (d - d0) / span;
+            if (t < 0) t = 0;
+            else if (t > 1) t = 1;
+        }
+        return designZ[i] + t * (v1 - designZ[i]);
+    };
+    return (x, y) => {
+        for (const zone of zones) {
+            const poly = zone.polygon;
+            if (!pointInPolygon(x, y, poly)) continue;
+            if (turnInOnly) return interp(zone.turnInM);
+            const ax = poly[0][0];
+            const ay = poly[0][1];
+            const ux = poly[1][0] - ax;
+            const uy = poly[1][1] - ay;
+            const vx = poly[3][0] - ax;
+            const vy = poly[3][1] - ay;
+            const det = ux * vy - uy * vx;
+            let u = 0;
+            if (Math.abs(det) >= 1e-9) {
+                u = ((x - ax) * vy - (y - ay) * vx) / det;
+                if (u < 0) u = 0;
+                else if (u > 1) u = 1;
+            }
+            return interp(zone.turnInM + u * zone.widthM);
+        }
+        return 100;
+    };
 }
 
 function speedTrace(x, y, z, distances, lapM, trackWidthM) {
@@ -95,10 +137,11 @@ function speedTrace(x, y, z, distances, lapM, trackWidthM) {
         z: z[i],
         distance: distances[i],
     }));
+    // The viewer rides the designed centreline z(s). The deck is flat, so the
+    // racing line is at that height rather than a sample off the centreline.
     const profile = buildDriveProfile(points, {
         lapLengthM: lapM,
         trackWidthM,
-        sampleZ: (px, py) => deckElevation(points, px, py),
     });
     if (!profile) return [];
     return profile.samples.map((s) => ({ distance: s.distance, speed_mps: s.speedMps }));

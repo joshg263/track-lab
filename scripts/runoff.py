@@ -14,6 +14,11 @@ A zone passes only when terrain inside it stays under the slope limit, stays
 within the drop/wall step of the designed road-edge height, and does not meet
 another part of the track more than overlap_gap metres away along the lap.
 
+The road edge is the designed deck. That deck is flat from the centreline to
+the edge, so its height is the vertical profile's z(s), not a terrain or mesh
+sample at the edge coordinates. Each sample is compared with z(s) on the
+outside edge beside it.
+
 The earthworks figure is the rough cut and fill to level a failing zone with
 that road-edge height. It is not a construction estimate.
 
@@ -273,6 +278,45 @@ def _chainage_gap(distance_m: float, start_m: float, end_m: float, lap_m: float)
     return min(x - length, lap_m - x)
 
 
+def _along_edge(poly: list[tuple[float, float]], sx: float, sy: float) -> float:
+    """Fraction along the outside road edge, the first side of the parallelogram."""
+    ax, ay = poly[0]
+    bx, by = poly[1]
+    dx, dy = poly[3]
+    ux = bx - ax
+    uy = by - ay
+    vx = dx - ax
+    vy = dy - ay
+    det = ux * vy - uy * vx
+    if abs(det) < 1e-9:
+        return 0.0
+    u = ((sx - ax) * vy - (sy - ay) * vx) / det
+    if u < 0.0:
+        return 0.0
+    if u > 1.0:
+        return 1.0
+    return u
+
+
+def _road_edge_z(
+    distances: np.ndarray,
+    design_z: np.ndarray,
+    lap_m: float,
+    poly: list[tuple[float, float]],
+    sx: float,
+    sy: float,
+    start_m: float,
+    width_m: float,
+) -> float:
+    """Designed deck height on the outside edge beside this sample.
+
+    The deck is flat from centreline to edge, so this is z(s) from the
+    vertical profile. It is not a terrain or mesh sample at the edge.
+    """
+    u = _along_edge(poly, sx, sy)
+    return _interp_closed(distances, design_z, lap_m, start_m + u * width_m)
+
+
 def _polygon_area(poly: list[tuple[float, float]]) -> float:
     area = 0.0
     n = len(poly)
@@ -452,19 +496,23 @@ def assess_runoff(
         z_edge = _interp_closed(distances, design_z, lap_m, start_m)
         samples = _interior_samples(poly, SAMPLE_SPACING_M, sample_ground)
         usable = []
+        edge_z = []
         for ix, iy, sx, sy, sz in samples:
+            z_ref = _road_edge_z(
+                distances, design_z, lap_m, poly, sx, sy, start_m, width_m,
+            )
             if not math.isfinite(sz):
-                usable.append((ix, iy, sx, sy, z_edge - step_m - 1.0))
-            else:
-                usable.append((ix, iy, sx, sy, sz))
+                sz = z_ref - step_m - 1.0
+            usable.append((ix, iy, sx, sy, sz))
+            edge_z.append(z_ref)
         px, py = -ey, ex
         long_slope, cross_slope = _max_slopes(usable, ex, ey, px, py)
         max_drop = 0.0
         max_wall = 0.0
         cut_sum = 0.0
         fill_sum = 0.0
-        for _ix, _iy, _sx, _sy, sz in usable:
-            delta = sz - z_edge
+        for (_ix, _iy, _sx, _sy, sz), z_ref in zip(usable, edge_z):
+            delta = sz - z_ref
             if -delta > max_drop:
                 max_drop = -delta
             if delta > max_wall:

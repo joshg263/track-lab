@@ -222,6 +222,29 @@ function chainageGap(distanceM, startM, endM, lapM) {
     return Math.min(x - length, lapM - x);
 }
 
+function alongEdge(poly, sx, sy) {
+    const [ax, ay] = poly[0];
+    const [bx, by] = poly[1];
+    const [dx, dy] = poly[3];
+    const ux = bx - ax;
+    const uy = by - ay;
+    const vx = dx - ax;
+    const vy = dy - ay;
+    const det = ux * vy - uy * vx;
+    if (Math.abs(det) < 1e-9) return 0;
+    let u = ((sx - ax) * vy - (sy - ay) * vx) / det;
+    if (u < 0) return 0;
+    if (u > 1) return 1;
+    return u;
+}
+
+function roadEdgeZ(distances, designZ, lapM, poly, sx, sy, startM, widthM) {
+    // Designed deck height on the outside edge beside this sample. The deck
+    // is flat from centreline to edge, so this is z(s), not a mesh sample.
+    const u = alongEdge(poly, sx, sy);
+    return interpClosed(distances, designZ, lapM, startM + u * widthM);
+}
+
 function polygonArea(poly) {
     let area = 0;
     const n = poly.length;
@@ -381,11 +404,16 @@ export function assessRunoff(x, y, distances, designZ, lapM, sampleGround, optio
 
         const zEdge = interpClosed(distances, designZ, lapM, startM);
         const raw = interiorSamples(poly, SAMPLE_SPACING_M, sampleGround);
-        const usable = raw.map((sample) => (
-            Number.isFinite(sample[4])
-                ? sample
-                : [sample[0], sample[1], sample[2], sample[3], zEdge - stepM - 1]
-        ));
+        const usable = [];
+        const edgeZ = [];
+        for (const sample of raw) {
+            const zRef = roadEdgeZ(
+                distances, designZ, lapM, poly, sample[2], sample[3], startM, widthM,
+            );
+            const sz = Number.isFinite(sample[4]) ? sample[4] : zRef - stepM - 1;
+            usable.push([sample[0], sample[1], sample[2], sample[3], sz]);
+            edgeZ.push(zRef);
+        }
         const px = -ey;
         const py = ex;
         const [longSlope, crossSlope] = maxSlopes(usable, ex, ey, px, py);
@@ -393,8 +421,8 @@ export function assessRunoff(x, y, distances, designZ, lapM, sampleGround, optio
         let maxWall = 0;
         let cutSum = 0;
         let fillSum = 0;
-        for (const sample of usable) {
-            const delta = sample[4] - zEdge;
+        for (let s = 0; s < usable.length; s++) {
+            const delta = usable[s][4] - edgeZ[s];
             if (-delta > maxDrop) maxDrop = -delta;
             if (delta > maxWall) maxWall = delta;
             if (delta > 0) cutSum += delta;
