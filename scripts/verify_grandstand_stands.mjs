@@ -21,15 +21,43 @@ const chromium = pw.chromium || pw.default.chromium;
 const fixturePath = join(root, 'scripts/fixtures/version-2.json');
 const fixture = JSON.parse(readFileSync(fixturePath, 'utf8'));
 const testName = `stands-test-${Date.now()}`;
+const emptyName = `stands-empty-${Date.now()}`;
+const v2Name = `version-2-verify-${Date.now()}`;
 
-function assertNearTrack(label, stands, maxM) {
+function assertEdgeClearanceRange(label, stands, minM = 40, maxM = 120) {
     for (const s of stands) {
-        if (s.preset) continue;
-        if (!(s.distM <= maxM)) {
-            throw new Error(`${label}: stand "${s.name}" is ${s.distM.toFixed(1)} m from track, want ≤${maxM}`);
+        const d = s.distEdgeM;
+        if (!(d >= minM - 0.5 && d <= maxM + 0.5)) {
+            throw new Error(
+                `${label}: stand "${s.name}" outside-edge clearance ${d.toFixed(1)} m, want ${minM}–${maxM}`,
+            );
         }
     }
 }
+
+async function defaultStandsOnPage(page) {
+    return page.evaluate(() => {
+        const tl = window.__tracklab;
+        return tl.cameraState().customStands.map((s) => ({
+            name: s.name,
+            distEdgeM: tl.trackEdgeClearanceM(s.x, s.y),
+        }));
+    });
+}
+
+const nanRes = await fetch(`${base}/api/layouts/edits`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+        name: `nan-test-${Date.now()}`,
+        control_points: [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 0, y: 10 }],
+        stands: [{ x: Number.NaN, y: 1 }],
+    }),
+});
+if (nanRes.status !== 400) {
+    throw new Error('NaN stand x should be rejected, got ' + nanRes.status);
+}
+console.log('NaN stand coords rejected');
 
 const browser = await chromium.launch({
     channel: 'chrome',
@@ -49,41 +77,42 @@ async function openLayout(layout) {
     await page.waitForTimeout(400);
 }
 
-await openLayout('layout_a_straight_hairpin');
-const defaultsA = await page.evaluate(() => {
-    const tl = window.__tracklab;
-    const custom = tl.cameraState().customStands;
-    return custom.map((s) => ({
-        name: s.name,
-        distM: tl.nearestTrackDistanceM(s.x, s.y),
-        preset: false,
-    }));
-});
-console.log('layout A default stands', JSON.stringify(defaultsA));
-if (defaultsA.length < 2) throw new Error('layout A: expected 2 default stands');
-if (/best/i.test(defaultsA[0]?.name || '')) {
-    throw new Error('layout A: first stand should be track-side, not best viewpoint');
+async function checkDefaults(layout) {
+    await openLayout(layout);
+    const defaults = await defaultStandsOnPage(page);
+    console.log(`${layout} default stands`, JSON.stringify(defaults));
+    if (defaults.length < 2) throw new Error(`${layout}: expected 2 default stands`);
+    if (/best/i.test(defaults[0]?.name || '')) {
+        throw new Error(`${layout}: first stand should be track-side, not best viewpoint`);
+    }
+    assertEdgeClearanceRange(layout, defaults);
 }
-assertNearTrack('layout A', defaultsA, 150);
+
+await checkDefaults('layout_a_straight_hairpin');
+await checkDefaults('version-1');
+
+const v2Payload = {
+    ...fixture,
+    name: v2Name,
+    edited_from: 'version-1',
+};
+delete v2Payload.stands;
+const v2Save = await fetch(`${base}/api/layouts/edits`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(v2Payload),
+});
+if (!v2Save.ok) throw new Error('version-2 fixture save failed: ' + v2Save.status);
+await checkDefaults(v2Name);
 
 await openLayout('version-1');
-const defaultsV1 = await page.evaluate(() => {
-    const tl = window.__tracklab;
-    return tl.cameraState().customStands.map((s) => ({
-        name: s.name,
-        distM: tl.nearestTrackDistanceM(s.x, s.y),
-    }));
-});
-console.log('version-1 default stands', JSON.stringify(defaultsV1));
-assertNearTrack('version-1', defaultsV1, 150);
-
 await page.click('#btn-cam-grandstand');
 await page.waitForFunction(() => window.__tracklab.getStats().cameraMode === 'grandstand');
 
 const placed = await page.evaluate(() => {
     const tl = window.__tracklab;
-    const base = tl.cameraState().customStands[0];
-    return tl.placeStandAt(base.x + 35, base.y + 22);
+    const base0 = tl.cameraState().customStands[0];
+    return tl.placeStandAt(base0.x + 35, base0.y + 22);
 });
 if (!placed) throw new Error('placeStandAt failed');
 
@@ -118,6 +147,29 @@ const reloaded = await page.evaluate((target) => {
 }, newStand);
 console.log('reloaded stands', JSON.stringify({ count: reloaded.count, found: reloaded.found }));
 if (!reloaded.found) throw new Error('placed stand missing after reload');
+
+const emptySave = await fetch(`${base}/api/layouts/edits`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+        ...fixture,
+        name: emptyName,
+        edited_from: 'version-1',
+        stands: [],
+    }),
+});
+if (!emptySave.ok) throw new Error('empty stands save failed');
+
+await openLayout(emptyName);
+const emptyReload = await page.evaluate(() => window.__tracklab.cameraState().customStands);
+console.log('empty stands reload', emptyReload.length);
+if (emptyReload.length !== 0) {
+    throw new Error('stands: [] should load with no custom stands (no auto-defaults)');
+}
+const presetsOnly = await page.evaluate(() =>
+    window.__tracklab.cameraState().stands.filter((s) => s.preset).length,
+);
+if (presetsOnly < 2) throw new Error('presets missing after empty stands load');
 
 await page.click('#btn-cam-grandstand');
 await page.waitForTimeout(500);

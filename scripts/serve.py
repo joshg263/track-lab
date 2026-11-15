@@ -24,6 +24,7 @@ POST /api/session-events
 
 import http.server
 import json
+import math
 import os
 import re
 import socketserver
@@ -180,20 +181,29 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     self._json(400, {"error": "stand"})
                     return
                 try:
-                    item = {"x": float(stand["x"]), "y": float(stand["y"])}
+                    sx = float(stand["x"])
+                    sy = float(stand["y"])
                 except (TypeError, ValueError):
                     self._json(400, {"error": "stand"})
                     return
+                if not (math.isfinite(sx) and math.isfinite(sy)):
+                    self._json(400, {"error": "stand"})
+                    return
+                item = {"x": sx, "y": sy}
                 stand_name = stand.get("name")
                 if isinstance(stand_name, str) and stand_name.strip():
                     item["name"] = stand_name.strip()[:64]
                 eye = stand.get("eye_elev_m")
                 if eye is not None:
                     try:
-                        item["eye_elev_m"] = float(eye)
+                        eye_f = float(eye)
                     except (TypeError, ValueError):
                         self._json(400, {"error": "stand"})
                         return
+                    if not math.isfinite(eye_f):
+                        self._json(400, {"error": "stand"})
+                        return
+                    item["eye_elev_m"] = eye_f
                 clean_stands.append(item)
             payload["stands"] = clean_stands
         os.makedirs(EDITS_DIR, exist_ok=True)
@@ -204,7 +214,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         overwritten = os.path.exists(dest)
         tmp = dest + ".tmp"
         with open(tmp, "w") as f:
-            json.dump(payload, f, indent=2)
+            json.dump(payload, f, indent=2, allow_nan=False)
             f.write("\n")
         os.replace(tmp, dest)
         write_edits_index(EDITS_DIR)

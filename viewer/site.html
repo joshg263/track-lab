@@ -694,8 +694,11 @@
                 selectedIndex = -1;
                 liveViewshedPct = null;
                 applyWorkingLayout();
-                const fromFile = standsFromLayout(layout);
-                customStands = fromFile || suggestDefaultStands();
+                if (Object.prototype.hasOwnProperty.call(layout, 'stands')) {
+                    customStands = standsFromLayout(layout);
+                } else {
+                    customStands = suggestDefaultStands();
+                }
                 rebuildDriveStands();
 
                 document.getElementById('layout-direction').textContent = layout.direction || '';
@@ -1589,14 +1592,12 @@
                 notes: note || currentLayout?.notes || '',
                 edited_from: currentLayoutKey,
             };
-            if (customStands.length) {
-                payload.stands = customStands.map((s, i) => {
-                    const item = { x: round2(s.x), y: round2(s.y) };
-                    if (s.name) item.name = s.name;
-                    if (Number.isFinite(s.eyeElev)) item.eye_elev_m = round2(s.eyeElev);
-                    return item;
-                });
-            }
+            payload.stands = customStands.map((s) => {
+                const item = { x: round2(s.x), y: round2(s.y) };
+                if (s.name) item.name = s.name;
+                if (Number.isFinite(s.eyeElev)) item.eye_elev_m = round2(s.eyeElev);
+                return item;
+            });
             let via = 'download';
             try {
                 const res = await fetch('/api/layouts/edits', {
@@ -1940,7 +1941,10 @@
                 carMarker.renderOrder = 12;
             } else if (cameraMode === 'grandstand' && camera) {
                 const dist = Math.max(40, camera.position.distanceTo(worldPos));
-                carMarker.scale.setScalar(THREE.MathUtils.clamp(dist / 45, 4, 22));
+                const fovRad = THREE.MathUtils.degToRad(camera.fov);
+                const maxScale = (dist * Math.tan(fovRad / 8)) / 4.4;
+                const raw = THREE.MathUtils.clamp(dist / 45, 2, 22);
+                carMarker.scale.setScalar(Math.max(1, Math.min(raw, maxScale)));
                 carMarker.material.depthTest = false;
                 carMarker.material.emissive.setHex(0x881018);
                 carMarker.renderOrder = 14;
@@ -2043,12 +2047,13 @@
         }
 
         function standsFromLayout(layout) {
-            const raw = layout?.stands;
-            if (!Array.isArray(raw) || !raw.length) return null;
+            const raw = layout.stands;
+            if (!Array.isArray(raw)) return [];
             const out = [];
             for (let i = 0; i < raw.length && i < 4; i++) {
                 const s = raw[i];
                 if (typeof s?.x !== 'number' || typeof s?.y !== 'number') continue;
+                if (!Number.isFinite(s.x) || !Number.isFinite(s.y)) continue;
                 const elev = meshElevation(s.x, s.y);
                 const name = typeof s.name === 'string' && s.name.trim()
                     ? s.name.trim().slice(0, 64) : `Stand ${out.length + 1}`;
@@ -2060,12 +2065,41 @@
                     eyeElev: Number.isFinite(s.eye_elev_m) ? s.eye_elev_m : elev + STAND_EYE_M,
                 });
             }
-            return out.length ? out : null;
+            return out;
+        }
+
+        function pointToSegmentDist(x, y, x0, y0, x1, y1) {
+            const dx = x1 - x0;
+            const dy = y1 - y0;
+            const lenSq = dx * dx + dy * dy;
+            if (lenSq < 1e-12) return Math.hypot(x - x0, y - y0);
+            let t = ((x - x0) * dx + (y - y0) * dy) / lenSq;
+            t = Math.max(0, Math.min(1, t));
+            return Math.hypot(x - (x0 + t * dx), y - (y0 + t * dy));
+        }
+
+        function nearestTrackCenterlineM(x, y) {
+            const pts = layoutPoints;
+            if (!pts || pts.length < 2) return null;
+            let best = Infinity;
+            for (let i = 0; i < pts.length; i++) {
+                const j = (i + 1) % pts.length;
+                const d = pointToSegmentDist(x, y, pts[i].x, pts[i].y, pts[j].x, pts[j].y);
+                if (d < best) best = d;
+            }
+            return best;
+        }
+
+        function trackEdgeClearanceM(x, y) {
+            const center = nearestTrackCenterlineM(x, y);
+            if (center == null) return null;
+            const halfW = (currentLayout?.track_width_m || TRACK_WIDTH) / 2;
+            return center - halfW;
         }
 
         function suggestDefaultStands() {
             const corners = liveMetrics?.corners;
-            if (!corners?.length || !workingPoints?.length) return [];
+            if (!corners?.length || !workingPoints?.length || !layoutPoints?.length) return [];
             const width = currentLayout?.track_width_m || TRACK_WIDTH;
             const halfW = width / 2;
             const centroid = workingPoints.reduce((a, p) => ({ x: a.x + p.x, y: a.y + p.y }), { x: 0, y: 0 });
@@ -2074,15 +2108,12 @@
             const sorted = [...corners].sort((a, b) => a.radius_m - b.radius_m);
             const picks = [];
             const used = [];
-            for (const c of sorted) {
-                if (picks.length >= 2) break;
-                if (used.some(u => Math.abs(u - c.position_m) < 80)) continue;
-                used.push(c.position_m);
+            const tryCorner = (c, label) => {
                 const pt = sampleCentreline(c.position_m);
-                if (!pt) continue;
+                if (!pt) return null;
                 const p0 = sampleCentreline(c.position_m - 6);
                 const p1 = sampleCentreline(c.position_m + 6);
-                if (!p0 || !p1) continue;
+                if (!p0 || !p1) return null;
                 let tx = p1.x - p0.x;
                 let ty = p1.y - p0.y;
                 const tlen = Math.hypot(tx, ty) || 1;
@@ -2096,18 +2127,63 @@
                     nx = -nx;
                     ny = -ny;
                 }
-                const offsetM = halfW + 70;
-                const sx = pt.x + nx * offsetM;
-                const sy = pt.y + ny * offsetM;
-                const elev = meshElevation(sx, sy);
-                if (!Number.isFinite(elev)) continue;
-                picks.push({
-                    id: `suggest-${picks.length}`,
-                    name: picks.length === 0 ? 'Tight corner 1' : 'Tight corner 2',
-                    x: sx,
-                    y: sy,
-                    eyeElev: elev + STAND_EYE_M,
-                });
+                for (let edgeDist = 40; edgeDist <= 120; edgeDist += 2) {
+                    const offsetM = halfW + edgeDist;
+                    const sx = pt.x + nx * offsetM;
+                    const sy = pt.y + ny * offsetM;
+                    const clear = trackEdgeClearanceM(sx, sy);
+                    if (clear == null || clear < 40 - 0.5) continue;
+                    if (clear > 120 + 0.5) break;
+                    const elev = meshElevation(sx, sy);
+                    if (!Number.isFinite(elev)) continue;
+                    return {
+                        id: `suggest-${picks.length}`,
+                        name: label,
+                        x: sx,
+                        y: sy,
+                        eyeElev: elev + STAND_EYE_M,
+                    };
+                }
+                for (let edgeDist = 122; edgeDist <= 200; edgeDist += 2) {
+                    const offsetM = halfW + edgeDist;
+                    const sx = pt.x + nx * offsetM;
+                    const sy = pt.y + ny * offsetM;
+                    const clear = trackEdgeClearanceM(sx, sy);
+                    if (clear == null) continue;
+                    if (clear >= 40 && clear <= 120) {
+                        const elev = meshElevation(sx, sy);
+                        if (!Number.isFinite(elev)) continue;
+                        return {
+                            id: `suggest-${picks.length}`,
+                            name: label,
+                            x: sx,
+                            y: sy,
+                            eyeElev: elev + STAND_EYE_M,
+                        };
+                    }
+                    if (clear > 120) break;
+                }
+                return null;
+            };
+            for (const c of sorted) {
+                if (picks.length >= 2) break;
+                if (used.some(u => Math.abs(u - c.position_m) < 80)) continue;
+                const label = picks.length === 0 ? 'Tight corner 1' : 'Tight corner 2';
+                const stand = tryCorner(c, label);
+                if (!stand) continue;
+                used.push(c.position_m);
+                picks.push(stand);
+            }
+            if (picks.length < 2) {
+                for (const c of sorted) {
+                    if (picks.length >= 2) break;
+                    if (used.some(u => Math.abs(u - c.position_m) < 40)) continue;
+                    const label = picks.length === 0 ? 'Tight corner 1' : 'Tight corner 2';
+                    const stand = tryCorner(c, label);
+                    if (!stand) continue;
+                    used.push(c.position_m);
+                    picks.push(stand);
+                }
             }
             return picks;
         }
@@ -2201,13 +2277,7 @@
         }
 
         function nearestTrackDistanceM(x, y) {
-            if (!layoutPoints?.length) return null;
-            let best = Infinity;
-            for (const p of layoutPoints) {
-                const d = Math.hypot(p.x - x, p.y - y);
-                if (d < best) best = d;
-            }
-            return best;
+            return trackEdgeClearanceM(x, y);
         }
 
         function updateCameraModeUi() {
@@ -2667,6 +2737,13 @@
                 },
                 placeStandAt,
                 nearestTrackDistanceM,
+                trackEdgeClearanceM,
+                deleteAllCustomStands() {
+                    customStands = [];
+                    grandstandIndex = 0;
+                    rebuildDriveStands();
+                    if (cameraMode === 'grandstand') applyDriveCamera(null);
+                },
             };
 
             animate();
