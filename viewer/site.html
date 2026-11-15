@@ -59,7 +59,7 @@
         .site-info .value { color: #00ffcc; font-weight: bold; }
 
         #stats {
-            top: 20px; right: 20px; max-width: 260px;
+            top: 20px; right: 20px; max-width: 320px;
             max-height: calc(100vh - 40px); overflow: auto;
         }
         #stats h2 { margin-bottom: 10px; font-size: 16px; color: #4ecdc4; }
@@ -157,6 +157,19 @@
             width: 100%; height: 56px; margin-top: 6px; border-radius: 4px;
             background: #10141c; display: block;
         }
+        #profile-limits { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 8px; }
+        #profile-limits label { font-size: 11px; margin: 2px 0; }
+        #profile-limits input[type="number"] {
+            width: 64px; background: #333; color: #eee; border: 1px solid #555;
+            border-radius: 4px; padding: 3px 4px; font-family: monospace; font-size: 11px;
+        }
+        #profile-chart {
+            width: 100%; height: 88px; margin-top: 6px; border-radius: 4px;
+            background: #10141c; display: block;
+        }
+        #profile-legend { display: flex; gap: 10px; margin-top: 4px; font-size: 10px; color: #aaa; }
+        #profile-legend i { display: inline-block; width: 10px; height: 8px; margin-right: 3px; vertical-align: middle; }
+        #profile-note { font-size: 10px; color: #aaa; line-height: 1.35; margin-top: 4px; }
         #lap-estimate { font-size: 11px; color: #f9ca24; margin-top: 3px; font-family: monospace; }
         #car-settings { margin-top: 8px; }
         #car-settings .car-note { font-size: 10px; color: #999; line-height: 1.35; }
@@ -224,6 +237,22 @@
             </select>
         </label>
         <div id="layout-direction" class="layout-direction" style="display: none;"></div>
+
+        <h3>Vertical profile</h3>
+        <div id="profile-limits">
+            <label>Cut/fill <input id="cut-fill-cap" type="number" min="0.5" max="40" step="0.5" value="6"> m</label>
+            <label>Max grade <input id="grade-cap" type="number" value="12" disabled> %</label>
+            <label>Crest R <input id="crest-radius" type="number" min="50" max="20000" step="50" value="1000"> m</label>
+            <label>Dip R <input id="dip-radius" type="number" min="50" max="20000" step="50" value="600"> m</label>
+        </div>
+        <canvas id="profile-chart" width="300" height="88"></canvas>
+        <div id="profile-legend">
+            <span><i style="background:#9aa4b2"></i>raw</span>
+            <span><i style="background:#7dffb3"></i>design</span>
+            <span><i style="background:#e07a3d"></i>cut</span>
+            <span><i style="background:#3d8bff"></i>fill</span>
+        </div>
+        <div id="profile-note"></div>
 
         <h3>📷 Camera</h3>
         <div id="camera-modes">
@@ -307,6 +336,7 @@
             <input type="range" id="exaggeration" min="1" max="5" step="0.5" value="1.5">
             <span id="exag-value">1.5×</span>
         </label>
+        <label><input type="checkbox" id="designed-profile" checked> Designed road height</label>
         <label><input type="checkbox" id="show-layout" checked> Show layout ribbon</label>
         <label><input type="checkbox" id="show-racing-line" checked> Racing line</label>
         <label><input type="checkbox" id="show-labels" checked> Show corner labels</label>
@@ -348,7 +378,14 @@
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
         import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
         import { Sky } from 'three/addons/objects/Sky.js';
-        import { analyzeLayout, makeDemSampler } from './layout_math.js';
+        import {
+            analyzeLayout,
+            gradeProfile,
+            makeDemSampler,
+            maxAbsGradientPct,
+            meanSampleSpacing,
+        } from './layout_math.js';
+        import { MAX_CATCH_M, buildVerticalProfile } from './vertical_profile.js';
         import {
             advanceDistance,
             buildDriveProfile,
@@ -360,6 +397,10 @@
         import { Terrain, computeViewshed } from './viewshed.js';
 
         const params = new URLSearchParams(location.search);
+        if (params.get('profile') === 'terrain') {
+            const designedBox = document.getElementById('designed-profile');
+            if (designedBox) designedBox.checked = false;
+        }
         const SITES_BASE = 'data/sites';
 
         let scene, camera, renderer, labelRenderer, controls, world, sky, sun;
@@ -398,6 +439,9 @@
         let sessionNotes = [];
         let handleGroup = null;
         let sampleZ = () => 0;
+        let verticalProfile = null;
+        const MESH_SAMPLE_REACH_M = 16;
+        const MESH_SIDE_SLOPE = 0.5;
         let cameraMode = 'orbit';
         let grandstandIndex = 0;
         let driveDistance = 0;
@@ -587,6 +631,7 @@
                     heights, rows: terrainMeta.rows, cols: terrainMeta.cols,
                     left: terrainMeta.left, top: terrainMeta.top,
                     resX: terrainMeta.res_x, resY: terrainMeta.res_y,
+                    displayHeights: new Float32Array(heights),
                 };
                 viewshedTerrain = new Terrain({
                     rows: terrain.rows, cols: terrain.cols,
@@ -699,6 +744,7 @@
             currentLayoutKey = null;
             layoutPoints = null;
             liveMetrics = null;
+            verticalProfile = null;
             driveProfile = null;
             originalPoints = null;
             workingPoints = null;
@@ -714,6 +760,8 @@
             
             document.getElementById('layout-stats').style.display = 'none';
             document.getElementById('layout-direction').style.display = 'none';
+            blendEarthworksIntoHeights();
+            drawProfileChart();
             updateEditButtons();
             renderNotes();
             onLayoutPathChanged();
@@ -770,14 +818,19 @@
                 
                 const centerZ = p.z;
                 const localY = (elev) => elev - baseElevation;
+                const designed = designEnabled() && verticalProfile;
                 
                 const edge = (w, drop) => {
                     const lx = p.x + nx * w, ly = p.y + ny * w;
                     const rx = p.x - nx * w, ry = p.y - ny * w;
                     // Drive views sit on the rendered triangles. The overview ribbon
-                    // keeps the bilinear sample the checker uses, lifted clear of the mesh.
-                    const lz = eye ? meshElevation(lx, ly) : Math.max(sampleTerrain(lx, ly), centerZ);
-                    const rz = eye ? meshElevation(rx, ry) : Math.max(sampleTerrain(rx, ry), centerZ);
+                    // sits on the designed deck, or on the terrain sample when that is off.
+                    const lz = eye
+                        ? meshElevation(lx, ly)
+                        : (designed ? centerZ : Math.max(sampleTerrain(lx, ly), centerZ));
+                    const rz = eye
+                        ? meshElevation(rx, ry)
+                        : (designed ? centerZ : Math.max(sampleTerrain(rx, ry), centerZ));
                     return [lx, localY(lz) + lift - drop, -ly, rx, localY(rz) + lift - drop, -ry];
                 };
                 
@@ -847,7 +900,7 @@
             driveProfile = buildDriveProfile(layoutPoints, {
                 lapLengthM: liveMetrics.lapLengthM,
                 trackWidthM: trackWidthM(),
-                sampleZ,
+                sampleZ: designEnabled() && verticalProfile ? deckElevation : sampleZ,
                 ...readCarInputs(),
             });
         }
@@ -868,8 +921,11 @@
                 const len = Math.hypot(dx, dy) || 1;
                 const nx = -dy / len;
                 const ny = dx / len;
+                const designed = designEnabled() && verticalProfile;
                 const place = (x, y) => {
-                    const z = eye ? meshElevation(x, y) : Math.max(sampleTerrain(x, y), p.z);
+                    const z = eye
+                        ? meshElevation(x, y)
+                        : (designed ? p.z : Math.max(sampleTerrain(x, y), p.z));
                     return [x, z - baseElevation + lift + 0.28, -y];
                 };
                 verts.push(...place(p.x + nx * half, p.y + ny * half));
@@ -982,11 +1038,20 @@
             const numCorners = liveMetrics.numCorners;
             const minRadius = liveMetrics.minRadiusM;
             const maxGrad = liveMetrics.maxGradientPct;
-            const elevs = layoutPoints.map(p => p.z);
+            const designGrad = liveMetrics.designGradientPct;
+            const elevs = layoutPoints.map(p => p.terrainZ ?? p.z);
             const elevRange = Math.max(...elevs) - Math.min(...elevs);
             const viewshedText = liveViewshedPct == null
                 ? '…'
                 : `${liveViewshedPct.toFixed(1)}%${viewshedPending ? ' (on release)' : ''}`;
+            const limits = profileLimits();
+            const crestT = verticalProfile?.terrain.min_crest_radius_m;
+            const crestD = verticalProfile?.design.min_crest_radius_m;
+            const dipT = verticalProfile?.terrain.min_dip_radius_m;
+            const dipD = verticalProfile?.design.min_dip_radius_m;
+            const works = verticalProfile?.earthworks;
+            const fmtR = (v) => (v == null ? '—' : `${Math.round(v)} m`);
+            const pair = (terrainText, designText) => `terrain ${terrainText} · design ${designText}`;
 
             const checks = [
                 { id: 'lap', name: 'Lap length', value: `${(lapLength / 1000).toFixed(3)} km`,
@@ -994,8 +1059,26 @@
                 { id: 'radius', name: 'Min radius', value: minRadius != null ? `${Number(minRadius).toFixed(1)} m` : '—',
                   pass: minRadius != null && minRadius >= 15, target: '≥15 m' },
                 { id: 'corners', name: 'Corners', value: numCorners != null ? String(numCorners) : '—', pass: true, target: 'info' },
-                { id: 'gradient', name: 'Max gradient', value: maxGrad != null ? `${maxGrad.toFixed(1)}%` : '—',
-                  pass: maxGrad != null && maxGrad <= 12, target: '≤12%' },
+                { id: 'gradient', name: 'Max gradient',
+                  value: designGrad != null ? pair(`${maxGrad.toFixed(1)}%`, `${designGrad.toFixed(1)}%`) : `${maxGrad.toFixed(1)}%`,
+                  pass: (designGrad ?? maxGrad) != null && (designGrad ?? maxGrad) <= 12, target: '≤12%' },
+                { id: 'crest', name: 'Crest radius',
+                  value: verticalProfile ? pair(fmtR(crestT), fmtR(crestD)) : '—',
+                  pass: crestD == null || crestD >= limits.minCrestRadiusM,
+                  target: `≥${limits.minCrestRadiusM.toFixed(0)} m` },
+                { id: 'dip', name: 'Dip radius',
+                  value: verticalProfile ? pair(fmtR(dipT), fmtR(dipD)) : '—',
+                  pass: dipD == null || dipD >= limits.minDipRadiusM,
+                  target: `≥${limits.minDipRadiusM.toFixed(0)} m` },
+                { id: 'earth', name: 'Cut / fill',
+                  value: works
+                    ? `${works.max_cut_m.toFixed(1)} / ${works.max_fill_m.toFixed(1)} m`
+                    : '—',
+                  pass: !works || Math.max(works.max_cut_m, works.max_fill_m) <= limits.maxCutFillM + 0.005,
+                  target: `≤${limits.maxCutFillM.toFixed(0)} m` },
+                { id: 'volume', name: 'Volumes',
+                  value: works ? `${Math.round(works.cut_m3)} / ${Math.round(works.fill_m3)} m³` : '—',
+                  pass: true, target: 'info' },
                 { id: 'viewshed', name: 'Visible lap', value: viewshedText, pass: true, target: 'info' },
                 { id: 'elev', name: 'Elev range', value: `${elevRange.toFixed(0)} m`,
                   pass: true, target: 'info' },
@@ -1018,7 +1101,8 @@
                 terrainMesh.material.dispose();
             }
             
-            const { rows, cols, left, top, resX, resY, heights } = terrain;
+            ensureDisplayHeights();
+            const { rows, cols, left, top, resX, resY, displayHeights } = terrain;
             const [iw, is, ie, inn] = sceneData.imagery.bbox;
             
             const positions = new Float32Array(rows * cols * 3);
@@ -1030,7 +1114,7 @@
                     const lon = left + (j + 0.5) * resX;
                     const k = i * cols + j;
                     const x = (lon - frame.lon0) * frame.sx;
-                    const y = heights[k] - baseElevation;
+                    const y = displayHeights[k] - baseElevation;
                     const z = -(lat - frame.lat0) * frame.sy;
                     positions[k * 3] = x;
                     positions[k * 3 + 1] = y;
@@ -1314,14 +1398,272 @@
             URL.revokeObjectURL(a.href);
         }
 
+        function designEnabled() {
+            const box = document.getElementById('designed-profile');
+            return !box || box.checked;
+        }
+
+        function profileLimits() {
+            const num = (id, fallback) => {
+                const v = parseFloat(document.getElementById(id)?.value);
+                return Number.isFinite(v) && v > 0 ? v : fallback;
+            };
+            return {
+                maxGrade: 0.12,
+                maxCutFillM: num('cut-fill-cap', 6),
+                minCrestRadiusM: num('crest-radius', 1000),
+                minDipRadiusM: num('dip-radius', 600),
+            };
+        }
+
+        function fitVerticalProfile() {
+            verticalProfile = null;
+            if (!layoutPoints || layoutPoints.length < 8 || !liveMetrics) return;
+            const limits = profileLimits();
+            verticalProfile = buildVerticalProfile(
+                layoutPoints.map((p) => p.x),
+                layoutPoints.map((p) => p.y),
+                layoutPoints.map((p) => p.distance),
+                layoutPoints.map((p) => p.terrainZ),
+                liveMetrics.lapLengthM,
+                trackWidthM(),
+                sampleZ,
+                limits,
+            );
+            const spacing = meanSampleSpacing(
+                layoutPoints.map((p) => p.distance),
+                liveMetrics.lapLengthM,
+            );
+            const graded = gradeProfile(
+                layoutPoints.map((p) => p.distance),
+                verticalProfile.design_at_points,
+                spacing,
+                { closedTotalLength: liveMetrics.lapLengthM },
+            );
+            liveMetrics.designGradientPct = maxAbsGradientPct(graded.gradients);
+        }
+
+        function deckElevation(x, y) {
+            const pts = layoutPoints;
+            if (!pts || pts.length < 2) return sampleZ(x, y);
+            const n = pts.length;
+            let best = Infinity;
+            let bestZ = pts[0].z;
+            for (let i = 0; i < n; i++) {
+                const j = (i + 1) % n;
+                const ax = pts[i].x;
+                const ay = pts[i].y;
+                const dx = pts[j].x - ax;
+                const dy = pts[j].y - ay;
+                const len2 = dx * dx + dy * dy;
+                let t = len2 > 1e-8 ? ((x - ax) * dx + (y - ay) * dy) / len2 : 0;
+                if (t < 0) t = 0;
+                else if (t > 1) t = 1;
+                const px = ax + dx * t;
+                const py = ay + dy * t;
+                const d2 = (x - px) * (x - px) + (y - py) * (y - py);
+                if (d2 < best) {
+                    best = d2;
+                    bestZ = pts[i].z + (pts[j].z - pts[i].z) * t;
+                }
+            }
+            return bestZ;
+        }
+
+        function ensureDisplayHeights() {
+            if (!terrain) return;
+            if (!terrain.displayHeights || terrain.displayHeights.length !== terrain.heights.length) {
+                terrain.displayHeights = new Float32Array(terrain.heights);
+            }
+        }
+
+        function sectionBuckets(sections) {
+            const cell = 40;
+            const buckets = new Map();
+            for (let i = 0; i < sections.length; i++) {
+                const s = sections[i];
+                const key = `${Math.floor(s.x / cell)}:${Math.floor(s.y / cell)}`;
+                let list = buckets.get(key);
+                if (!list) {
+                    list = [];
+                    buckets.set(key, list);
+                }
+                list.push(i);
+            }
+            return { cell, buckets };
+        }
+
+        function nearestSection(x, y, sections, index) {
+            const { cell, buckets } = index;
+            const ix = Math.floor(x / cell);
+            const iy = Math.floor(y / cell);
+            let best = -1;
+            let bestD = 120 * 120;
+            for (let dx = -3; dx <= 3; dx++) {
+                for (let dy = -3; dy <= 3; dy++) {
+                    const list = buckets.get(`${ix + dx}:${iy + dy}`);
+                    if (!list) continue;
+                    for (const i of list) {
+                        const s = sections[i];
+                        const d = (s.x - x) * (s.x - x) + (s.y - y) * (s.y - y);
+                        if (d < bestD) {
+                            bestD = d;
+                            best = i;
+                        }
+                    }
+                }
+            }
+            return best;
+        }
+
+        // The DEM cell is about 25 m, so a vertex the road samples can sit
+        // outside the 14 m deck. Hold the designed height out to those
+        // vertices, then fall back to the terrain on a 1:2 slope.
+        function blendEarthworksIntoHeights() {
+            ensureDisplayHeights();
+            if (!terrain) return;
+            terrain.displayHeights.set(terrain.heights);
+            const sections = designEnabled() ? verticalProfile?.sections : null;
+            if (sections?.length) {
+                const index = sectionBuckets(sections);
+                const { rows, cols, left, top, resX, resY, heights, displayHeights } = terrain;
+                for (let i = 0; i < rows; i++) {
+                    const lat = top - (i + 0.5) * resY;
+                    const y = (lat - frame.lat0) * frame.sy;
+                    for (let j = 0; j < cols; j++) {
+                        const lon = left + (j + 0.5) * resX;
+                        const x = (lon - frame.lon0) * frame.sx;
+                        const si = nearestSection(x, y, sections, index);
+                        if (si < 0) continue;
+                        const s = sections[si];
+                        const lateral = (x - s.x) * s.nx + (y - s.y) * s.ny;
+                        const dist = Math.abs(lateral);
+                        const ground = heights[i * cols + j];
+                        const deckReach = s.half_m + MESH_SAMPLE_REACH_M;
+                        let z = null;
+                        if (dist <= deckReach) {
+                            z = s.z_design;
+                        } else {
+                            const info = lateral >= 0 ? s.left : s.right;
+                            const slopeZ = s.z_design + info.slope_sign * (dist - deckReach) * MESH_SIDE_SLOPE;
+                            if (info.slope_sign > 0 && slopeZ < ground - 1e-6) z = slopeZ;
+                            else if (info.slope_sign < 0 && slopeZ > ground + 1e-6) z = slopeZ;
+                        }
+                        if (z != null) displayHeights[i * cols + j] = z;
+                    }
+                }
+            }
+            writeDisplayHeightsToMesh();
+        }
+
+        function writeDisplayHeightsToMesh() {
+            if (!terrainMesh || !terrain?.displayHeights) return;
+            const pos = terrainMesh.geometry.attributes.position;
+            const h = terrain.displayHeights;
+            for (let k = 0; k < h.length; k++) pos.setY(k, h[k] - baseElevation);
+            pos.needsUpdate = true;
+            terrainMesh.geometry.computeVertexNormals();
+        }
+
+        function bindingBrief(runs) {
+            const interesting = (runs || []).filter((r) => r.status === 'violated' || r.kind === 'depth');
+            if (!interesting.length) return 'No limit is binding.';
+            const parts = interesting.slice(0, 3).map((run) => {
+                let label = run.kind;
+                if (run.kind === 'gradient') label = `gradient ${(Math.abs(run.peak) * 100).toFixed(1)}%`;
+                else if (run.kind === 'crest_radius') label = `crest R ${Math.round(run.peak)} m`;
+                else if (run.kind === 'dip_radius') label = `dip R ${Math.round(run.peak)} m`;
+                else if (run.kind === 'depth') label = `depth cap ${run.status} ${Math.abs(run.peak).toFixed(1)} m`;
+                const span = run.wraps
+                    ? `${Math.round(run.start_m)} m wrapping to ${Math.round(run.end_m)} m`
+                    : `${Math.round(run.start_m)}–${Math.round(run.end_m)} m`;
+                return `${label} @ ${span}`;
+            });
+            const extra = interesting.length - parts.length;
+            if (extra > 0) parts.push(`+${extra} more`);
+            return parts.join('; ') + '.';
+        }
+
+        function drawProfileChart() {
+            const canvas = document.getElementById('profile-chart');
+            const note = document.getElementById('profile-note');
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            const w = canvas.width;
+            const h = canvas.height;
+            ctx.clearRect(0, 0, w, h);
+            ctx.fillStyle = '#10141c';
+            ctx.fillRect(0, 0, w, h);
+            const profile = verticalProfile;
+            if (!profile) {
+                if (note) note.textContent = '';
+                return;
+            }
+            const terrainZ = profile.terrain_z;
+            const designZ = profile.design_z;
+            const n = terrainZ.length;
+            let lo = Infinity;
+            let hi = -Infinity;
+            for (let i = 0; i < n; i++) {
+                if (terrainZ[i] < lo) lo = terrainZ[i];
+                if (designZ[i] < lo) lo = designZ[i];
+                if (terrainZ[i] > hi) hi = terrainZ[i];
+                if (designZ[i] > hi) hi = designZ[i];
+            }
+            const pad = 6;
+            const span = Math.max(hi - lo, 1);
+            const xOf = (i) => pad + (i / Math.max(n - 1, 1)) * (w - pad * 2);
+            const yOf = (z) => pad + (hi - z) / span * (h - pad * 2);
+            for (let i = 0; i < n - 1; i++) {
+                ctx.fillStyle = terrainZ[i] >= designZ[i] ? 'rgba(224, 122, 61, 0.55)' : 'rgba(61, 139, 255, 0.5)';
+                ctx.beginPath();
+                ctx.moveTo(xOf(i), yOf(terrainZ[i]));
+                ctx.lineTo(xOf(i + 1), yOf(terrainZ[i + 1]));
+                ctx.lineTo(xOf(i + 1), yOf(designZ[i + 1]));
+                ctx.lineTo(xOf(i), yOf(designZ[i]));
+                ctx.closePath();
+                ctx.fill();
+            }
+            const stroke = (arr, color, width) => {
+                ctx.beginPath();
+                ctx.strokeStyle = color;
+                ctx.lineWidth = width;
+                for (let i = 0; i < n; i++) {
+                    const x = xOf(i);
+                    const y = yOf(arr[i]);
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+            };
+            stroke(terrainZ, '#9aa4b2', 1);
+            stroke(designZ, '#7dffb3', 1.5);
+            if (note) {
+                const ew = profile.earthworks;
+                const open = ew.daylight_miss_m?.length || 0;
+                const openText = open ? ` ${open} stations are still open at ${MAX_CATCH_M.toFixed(0)} m.` : '';
+                note.textContent =
+                    `Cut ${ew.max_cut_m.toFixed(1)} m / ${Math.round(ew.cut_m3)} m³, `
+                    + `fill ${ew.max_fill_m.toFixed(1)} m / ${Math.round(ew.fill_m3)} m³.${openText} `
+                    + bindingBrief(profile.bindings);
+            }
+        }
+
         function applyWorkingLayout() {
             if (!workingPoints || workingPoints.length < 2) return;
             liveMetrics = analyzeLayout(workingPoints, sampleZ);
-            layoutPoints = liveMetrics.points;
+            layoutPoints = liveMetrics.points.map((p) => ({ ...p, terrainZ: p.z }));
+            fitVerticalProfile();
+            if (designEnabled() && verticalProfile) {
+                const designAt = verticalProfile.design_at_points;
+                for (let i = 0; i < layoutPoints.length; i++) layoutPoints[i].z = designAt[i];
+            }
+            blendEarthworksIntoHeights();
             rebuildDriveProfile();
             buildTrackRibbon();
             buildCornerLabels();
             updateLayoutUI();
+            drawProfileChart();
             if (editMode) syncHandles();
             if (!dragging) scheduleViewshed();
             else {
@@ -1732,7 +2074,8 @@
 
         function meshElevation(layoutX, layoutY) {
             if (!terrain) return baseElevation;
-            const { rows, cols, left, top, resX, resY, heights } = terrain;
+            const { rows, cols, left, top, resX, resY } = terrain;
+            const heights = terrain.displayHeights || terrain.heights;
             const lon = frame.lon0 + layoutX / frame.sx;
             const lat = frame.lat0 + layoutY / frame.sy;
             let col = (lon - left) / resX - 0.5;
@@ -2366,6 +2709,7 @@
                         numCorners: liveMetrics?.numCorners ?? null,
                         minRadiusM: liveMetrics?.minRadiusM ?? null,
                         maxGradientPct: liveMetrics?.maxGradientPct ?? null,
+                        designGradientPct: liveMetrics?.designGradientPct ?? null,
                         viewshedPct: liveViewshedPct,
                         viewshedPending,
                         viewshedMs,
@@ -2380,6 +2724,27 @@
                         speedKmh: driveProfile ? sampleProfile(driveProfile, driveDistance)?.speedKmh ?? null : null,
                         driveState: driveProfile ? sampleProfile(driveProfile, driveDistance)?.state ?? null : null,
                         lapEstimateS: driveProfile?.lapTimeS ?? null,
+                    };
+                },
+                verticalSummary() {
+                    if (!verticalProfile) return null;
+                    const ew = verticalProfile.earthworks;
+                    return {
+                        designed: designEnabled(),
+                        feasible: verticalProfile.feasible,
+                        terrainGradientPct: liveMetrics?.maxGradientPct ?? null,
+                        designGradientPct: liveMetrics?.designGradientPct ?? null,
+                        terrainMinCrestM: verticalProfile.terrain.min_crest_radius_m,
+                        designMinCrestM: verticalProfile.design.min_crest_radius_m,
+                        terrainMinDipM: verticalProfile.terrain.min_dip_radius_m,
+                        designMinDipM: verticalProfile.design.min_dip_radius_m,
+                        maxCutM: ew.max_cut_m,
+                        maxFillM: ew.max_fill_m,
+                        cutM3: ew.cut_m3,
+                        fillM3: ew.fill_m3,
+                        joinStepM: verticalProfile.join_step_m,
+                        bindingCount: verticalProfile.bindings.length,
+                        note: document.getElementById('profile-note')?.textContent || '',
                     };
                 },
                 profileSummary() {
@@ -2542,6 +2907,14 @@
                 }
             });
             
+            document.getElementById('designed-profile').addEventListener('change', () => {
+                if (workingPoints) applyWorkingLayout();
+            });
+            for (const id of ['cut-fill-cap', 'crest-radius', 'dip-radius']) {
+                document.getElementById(id).addEventListener('change', () => {
+                    if (workingPoints) applyWorkingLayout();
+                });
+            }
             document.getElementById('show-layout').addEventListener('change', (e) => {
                 if (trackGroup) trackGroup.visible = e.target.checked;
             });

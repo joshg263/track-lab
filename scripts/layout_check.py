@@ -5,11 +5,12 @@ Layout checker for track designs on Nishiwaki Basin terrain.
 Validates layouts against rough F1-style heuristics:
 - Lap length: 3.5-4.5 km target
 - Minimum corner radius: ≥15m
-- Maximum longitudinal gradient: ≤12%
+- Maximum longitudinal gradient: ≤12% on the designed profile (terrain shown beside it)
+- Crest radius ≥1000 m and dip radius ≥600 m on the designed profile
 - Maximum cross-slope
 - No self-intersection
 - Stays inside DEM bounds
-- Cut/fill volume estimate
+- Cut/fill with a 6 m cap and 1:2 side slopes
 - Longest straight
 - Viewshed from best rim viewpoint
 
@@ -37,6 +38,13 @@ from road_profile import (
     max_abs_gradient_pct,
     mean_sample_spacing,
 )
+from vertical_profile import (
+    DEFAULT_MAX_CUT_FILL_M,
+    DEFAULT_MIN_CREST_RADIUS_M,
+    DEFAULT_MIN_DIP_RADIUS_M,
+    MAX_CATCH_M,
+    build_vertical_profile,
+)
 
 SITE_DIR = Path(__file__).parent.parent / "data" / "sites" / "nishiwaki_basin"
 LAYOUTS_DIR = SITE_DIR / "layouts"
@@ -46,6 +54,9 @@ LAP_LENGTH_MAX = 4500
 MIN_CORNER_RADIUS = 15
 MAX_GRADIENT_PCT = 12
 MAX_CROSS_SLOPE_PCT = 8
+MAX_CUT_FILL_M = DEFAULT_MAX_CUT_FILL_M
+MIN_CREST_RADIUS_M = DEFAULT_MIN_CREST_RADIUS_M
+MIN_DIP_RADIUS_M = DEFAULT_MIN_DIP_RADIUS_M
 GRADIENT_LIMIT_FOR_SMOOTHING = 0.12
 SPLINE_SAMPLE_SPACING_M = 2
 
@@ -308,6 +319,39 @@ def check_bounds(points: np.ndarray, dem: np.ndarray, transform,
     return outside_count == 0, outside_pct
 
 
+def _fmt_radius(value) -> str:
+    if value is None:
+        return "—"
+    return f"{value:.0f} m"
+
+
+def _binding_brief(runs: list[dict], limit: int = 3) -> str:
+    """One line naming the runs where a limit is missed or the depth cap is tight."""
+    interesting = [r for r in runs if r["status"] == "violated" or r["kind"] == "depth"]
+    if not interesting:
+        return "no limit is binding"
+    parts = []
+    for run in interesting[:limit]:
+        if run["kind"] == "gradient":
+            label = f"gradient {abs(run['peak']) * 100:.1f}%"
+        elif run["kind"] == "crest_radius":
+            label = f"crest R {run['peak']:.0f} m"
+        elif run["kind"] == "dip_radius":
+            label = f"dip R {run['peak']:.0f} m"
+        elif run["kind"] == "depth":
+            label = f"depth cap {run['status']} {abs(run['peak']):.1f} m"
+        else:
+            label = run["kind"]
+        span = f"{run['start_m']:.0f}–{run['end_m']:.0f} m"
+        if run.get("wraps"):
+            span = f"{run['start_m']:.0f} m wrapping to {run['end_m']:.0f} m"
+        parts.append(f"{label} @ {span}")
+    extra = len(interesting) - limit
+    if extra > 0:
+        parts.append(f"+{extra} more")
+    return "; ".join(parts)
+
+
 def estimate_cut_fill(points: np.ndarray, track_width: float, 
                       max_gradient: float = GRADIENT_LIMIT_FOR_SMOOTHING) -> dict:
     """
@@ -474,14 +518,43 @@ def check_layout(layout_path: Path, site_dir: Path = SITE_DIR) -> LayoutReport:
     )
     max_gradient = max_abs_gradient_pct(gradients)
     mean_gradient = float(np.mean(np.abs(gradients)))
+
+    def sample_ground(x, y):
+        return float(sample_dem(dem, transform, np.array([x]), np.array([y]), site_info)[0])
+
+    profile = build_vertical_profile(
+        points[:, 0],
+        points[:, 1],
+        distances,
+        points[:, 2],
+        float(lap_length),
+        float(track_width),
+        sample_ground,
+        max_grade=MAX_GRADIENT_PCT / 100.0,
+        max_cut_fill_m=MAX_CUT_FILL_M,
+        min_crest_radius_m=MIN_CREST_RADIUS_M,
+        min_dip_radius_m=MIN_DIP_RADIUS_M,
+    )
+    _, design_gradients = grade_profile(
+        distances,
+        profile["design_at_points"],
+        spacing_m,
+        smooth_sigma_m=ROAD_PROFILE_SMOOTH_M,
+        window_m=GRADIENT_WINDOW_M,
+        closed_total_length=lap_length,
+    )
+    design_gradient = max_abs_gradient_pct(design_gradients)
+    design_mean = float(np.mean(np.abs(design_gradients)))
+    earthworks = profile["earthworks"]
+    bindings = profile["bindings"]
+    terrain_geom = profile["terrain"]
+    design_geom = profile["design"]
     
     max_cross_slope = 5.0
     
     has_intersection, intersections = check_self_intersection(points, track_width)
     
     in_bounds, out_of_bounds_pct = check_bounds(points, dem, transform, site_info)
-    
-    cut_fill = estimate_cut_fill(points, track_width)
     
     straights = find_straights(radii, corner_distances)
     longest_straight = max([s["length_m"] for s in straights]) if straights else 0
@@ -514,12 +587,36 @@ def check_layout(layout_path: Path, site_dir: Path = SITE_DIR) -> LayoutReport:
         detail=f"{num_corners} corners"
     ))
     
+    gradient_runs = [r for r in bindings if r["kind"] == "gradient"]
     checks.append(CheckResult(
         name="max_gradient",
-        passed=max_gradient <= MAX_GRADIENT_PCT,
-        value=round(max_gradient, 1),
+        passed=design_gradient <= MAX_GRADIENT_PCT,
+        value=round(design_gradient, 1),
         target=f"≤{MAX_GRADIENT_PCT}%",
-        detail=f"Max: {max_gradient:.1f}%, Mean: {mean_gradient:.1f}%"
+        detail=(
+            f"Design {design_gradient:.1f}% (mean {design_mean:.1f}%), "
+            f"terrain {max_gradient:.1f}% (mean {mean_gradient:.1f}%). "
+            f"{_binding_brief(gradient_runs)}"
+        ),
+    ))
+
+    design_crest = design_geom["min_crest_radius_m"]
+    design_dip = design_geom["min_dip_radius_m"]
+    terrain_crest = terrain_geom["min_crest_radius_m"]
+    terrain_dip = terrain_geom["min_dip_radius_m"]
+    crest_ok = design_crest is None or design_crest >= MIN_CREST_RADIUS_M
+    dip_ok = design_dip is None or design_dip >= MIN_DIP_RADIUS_M
+    curve_runs = [r for r in bindings if r["kind"] in ("crest_radius", "dip_radius")]
+    checks.append(CheckResult(
+        name="vertical_curve",
+        passed=crest_ok and dip_ok,
+        value=round(design_crest, 0) if design_crest is not None else "—",
+        target=f"crest ≥{MIN_CREST_RADIUS_M:.0f} m, dip ≥{MIN_DIP_RADIUS_M:.0f} m",
+        detail=(
+            f"Design crest {_fmt_radius(design_crest)}, dip {_fmt_radius(design_dip)}; "
+            f"terrain crest {_fmt_radius(terrain_crest)}, dip {_fmt_radius(terrain_dip)}. "
+            f"{_binding_brief(curve_runs)}"
+        ),
     ))
     
     checks.append(CheckResult(
@@ -546,12 +643,23 @@ def check_layout(layout_path: Path, site_dir: Path = SITE_DIR) -> LayoutReport:
         detail=f"{out_of_bounds_pct:.1f}% outside bounds"
     ))
     
+    depth_violated = any(r["kind"] == "depth" and r["status"] == "violated" for r in bindings)
+    depth_runs = [r for r in bindings if r["kind"] == "depth"]
+    daylight_miss = earthworks["daylight_miss_m"]
+    daylight_note = (
+        f" {len(daylight_miss)} stations are still open at {MAX_CATCH_M:.0f} m, so those wedges stop there."
+        if daylight_miss else ""
+    )
     checks.append(CheckResult(
         name="cut_fill_volume",
-        passed=True,
-        value=round(cut_fill["total_m3"], 0),
-        target="info",
-        detail=f"Cut: {cut_fill['cut_m3']:.0f} m³, Fill: {cut_fill['fill_m3']:.0f} m³"
+        passed=not depth_violated,
+        value=round(earthworks["total_m3"], 0),
+        target="info" if not depth_violated else f"≤{MAX_CUT_FILL_M:.0f} m",
+        detail=(
+            f"Cut {earthworks['max_cut_m']:.2f} m / {earthworks['cut_m3']:.0f} m³, "
+            f"fill {earthworks['max_fill_m']:.2f} m / {earthworks['fill_m3']:.0f} m³, "
+            f"1:2 side slopes.{daylight_note} {_binding_brief(depth_runs)}"
+        ),
     ))
     
     checks.append(CheckResult(
@@ -583,10 +691,21 @@ def check_layout(layout_path: Path, site_dir: Path = SITE_DIR) -> LayoutReport:
             "min_radius_m": round(min_radius, 1),
             "corners": corners,
             "max_gradient_pct": round(max_gradient, 1),
+            "max_gradient_design_pct": round(design_gradient, 1),
+            "terrain_min_crest_radius_m": None if terrain_crest is None else round(terrain_crest, 1),
+            "design_min_crest_radius_m": None if design_crest is None else round(design_crest, 1),
+            "terrain_min_dip_radius_m": None if terrain_dip is None else round(terrain_dip, 1),
+            "design_min_dip_radius_m": None if design_dip is None else round(design_dip, 1),
+            "max_cut_m": round(earthworks["max_cut_m"], 2),
+            "max_fill_m": round(earthworks["max_fill_m"], 2),
+            "cut_m3": round(earthworks["cut_m3"], 0),
+            "fill_m3": round(earthworks["fill_m3"], 0),
             "longest_straight_m": round(longest_straight, 0),
             "viewshed_pct": round(viewshed_pct, 1),
-            "cut_fill_m3": round(cut_fill["total_m3"], 0),
+            "cut_fill_m3": round(earthworks["total_m3"], 0),
             "elevation_range_m": round(float(np.max(points[:, 2]) - np.min(points[:, 2])), 0),
+            "feasible": profile["feasible"],
+            "binding_brief": _binding_brief(bindings, limit=8),
         }
     )
 
@@ -629,6 +748,19 @@ def write_viewer_metrics(layout_paths: list[Path], reports: list[LayoutReport], 
             "max_gradient_pass": s["max_gradient_pct"] <= MAX_GRADIENT_PCT,
             "gradient_window_m": GRADIENT_WINDOW_M,
             "road_profile_smooth_m": ROAD_PROFILE_SMOOTH_M,
+            "design_max_gradient_pct": s["max_gradient_design_pct"],
+            "design_max_gradient_pass": s["max_gradient_design_pct"] <= MAX_GRADIENT_PCT,
+            "terrain_min_crest_radius_m": s["terrain_min_crest_radius_m"],
+            "design_min_crest_radius_m": s["design_min_crest_radius_m"],
+            "terrain_min_dip_radius_m": s["terrain_min_dip_radius_m"],
+            "design_min_dip_radius_m": s["design_min_dip_radius_m"],
+            "max_cut_m": s["max_cut_m"],
+            "max_fill_m": s["max_fill_m"],
+            "cut_m3": s["cut_m3"],
+            "fill_m3": s["fill_m3"],
+            "min_crest_radius_m": MIN_CREST_RADIUS_M,
+            "min_dip_radius_m": MIN_DIP_RADIUS_M,
+            "max_cut_fill_m": MAX_CUT_FILL_M,
         }
     with open(out_path, "w") as f:
         json.dump(payload, f, indent=2)
@@ -659,7 +791,7 @@ def print_summary_table(reports: list[LayoutReport]):
             str(int(s["lap_length_m"])),
             str(s["num_corners"]),
             str(s["min_radius_m"]),
-            str(s["max_gradient_pct"]),
+            f"{s['max_gradient_pct']}/{s['max_gradient_design_pct']}",
             str(int(s["longest_straight_m"])),
             str(s["viewshed_pct"]),
             str(int(s["cut_fill_m3"])),
@@ -684,7 +816,7 @@ def main():
     parser.add_argument(
         "--relax-gradient-fail",
         action="store_true",
-        help="Exit 0 when only max_gradient checks fail (direction-loop verify)",
+        help="Exit 0 when only max_gradient and vertical_curve checks fail (earthworks-limited)",
     )
     args = parser.parse_args()
     
@@ -750,7 +882,7 @@ def main():
             all(
                 c.passed
                 for c in r.checks
-                if c.target != "info" and c.name != "max_gradient"
+                if c.target != "info" and c.name not in ("max_gradient", "vertical_curve")
             )
             for r in reports
         )
