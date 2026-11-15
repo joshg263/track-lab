@@ -210,7 +210,9 @@ await page.waitForTimeout(400);
 const stands = await page.evaluate(() => window.__tracklab.cameraState().stands);
 console.log('stands', JSON.stringify(stands));
 if (!stands.some(s => /best/i.test(s.name))) throw new Error('missing best-viewpoint grandstand');
-if (stands.length < 2) throw new Error('expected a second grandstand');
+if (stands.length < 3) throw new Error('expected track-side stands plus presets');
+const first = stands[0];
+if (/best/i.test(first.name)) throw new Error('default stand should be track-side, not best viewpoint');
 await page.screenshot({ path: join(root, 'docs/grandstand.png') });
 
 await page.click('#btn-cam-helicopter');

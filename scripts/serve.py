@@ -169,6 +169,33 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         edited_from = body.get("edited_from")
         if isinstance(edited_from, str) and edited_from:
             payload["edited_from"] = edited_from[:80]
+        stands = body.get("stands")
+        if stands is not None:
+            if not isinstance(stands, list) or len(stands) > 4:
+                self._json(400, {"error": "stands"})
+                return
+            clean_stands = []
+            for stand in stands:
+                if not isinstance(stand, dict) or "x" not in stand or "y" not in stand:
+                    self._json(400, {"error": "stand"})
+                    return
+                try:
+                    item = {"x": float(stand["x"]), "y": float(stand["y"])}
+                except (TypeError, ValueError):
+                    self._json(400, {"error": "stand"})
+                    return
+                stand_name = stand.get("name")
+                if isinstance(stand_name, str) and stand_name.strip():
+                    item["name"] = stand_name.strip()[:64]
+                eye = stand.get("eye_elev_m")
+                if eye is not None:
+                    try:
+                        item["eye_elev_m"] = float(eye)
+                    except (TypeError, ValueError):
+                        self._json(400, {"error": "stand"})
+                        return
+                clean_stands.append(item)
+            payload["stands"] = clean_stands
         os.makedirs(EDITS_DIR, exist_ok=True)
         dest = os.path.join(EDITS_DIR, name + ".json")
         if os.path.dirname(os.path.abspath(dest)) != os.path.abspath(EDITS_DIR):
