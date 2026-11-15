@@ -35,11 +35,17 @@ from layout_check import (  # noqa: E402
     sample_dem,
 )
 from runoff import (  # noqa: E402
+    DEFAULT_DECEL_G,
     GRAVITY_MPS2,
+    _approach_tangent,
+    _escape,
     _interp_closed,
+    _max_slopes,
     _point_in_polygon,
+    _turn_sign,
     assess_runoff,
 )
+from corner_detection import analyze_corners_xy  # noqa: E402
 from vertical_profile import build_vertical_profile  # noqa: E402
 
 LAYOUTS = [
@@ -375,6 +381,82 @@ def check_designed_edge(skip_js: bool) -> None:
     )), "edge-turn-in")
 
 
+def check_default_decel(skip_js: bool) -> None:
+    """Omitting deceleration is the gravel default, not the 0.05 g floor."""
+    xy, distances, lap = stadium()
+    design = np.full(len(xy), 100.0)
+
+    def flat(_x, _y):
+        return 100.0
+
+    report = assess_runoff(xy[:, 0], xy[:, 1], distances, design, lap, flat)
+    if abs(report["decel_g"] - DEFAULT_DECEL_G) > 1e-9:
+        fail(f"default decel {report['decel_g']} is not gravel {DEFAULT_DECEL_G} g")
+    for corner in report["corners"]:
+        expected = (corner["speed_mps"] ** 2) / (2 * DEFAULT_DECEL_G * GRAVITY_MPS2)
+        if abs(corner["depth_m"] - expected) > 1e-6:
+            fail(f"default depth {corner['depth_m']} != v^2/(2*0.5g) {expected}")
+    print(f"default decel is gravel {DEFAULT_DECEL_G} g")
+    if skip_js:
+        return
+    body = payload_from(xy, distances, design, lap, {"kind": "constant", "z": 100})
+    del body["decelG"]
+    compare(report, run_js("assess", body), "default-decel")
+
+
+def check_diagonal_slope(skip_js: bool) -> None:
+    """A grade along the escape is the full longitudinal slope, not a split partial."""
+    ex, ey = 1.0 / math.sqrt(1.25), -0.5 / math.sqrt(1.25)
+    px, py = -ey, ex
+    spacing = 5.0
+    samples = []
+    for ix in range(6):
+        for iy in range(6):
+            x = ix * spacing
+            y = iy * spacing
+            z = 0.12 * (ex * x + ey * y)
+            samples.append((ix, iy, x, y, z))
+    long_slope, cross_slope = _max_slopes(samples, ex, ey, px, py)
+    if abs(long_slope - 0.12) > 1e-6 or abs(cross_slope) > 1e-6:
+        fail(f"diagonal plane should be 12% along escape and 0% across, got {long_slope:.4%} / {cross_slope:.4%}")
+    print("diagonal grade: 12% longitudinal, 0% cross")
+
+    xy, distances, lap = stadium()
+    analysis = analyze_corners_xy(np.column_stack([xy[:, 0], xy[:, 1]]), distances, closed=True)
+    run = analysis["runs"][0]
+    resampled = analysis["xy"]
+    resampled_d = analysis["distances"]
+    resample_lap = float(resampled_d[-1])
+    sign = _turn_sign(resampled, resampled_d, resample_lap, run["start_index"], run["end_index"])
+    tx, ty = _approach_tangent(resampled, resampled_d, resample_lap, float(run["start_m"]))
+    cex, cey = _escape(tx, ty, sign)
+    design = np.full(len(xy), 100.0)
+
+    def plane(x, y):
+        return 100.0 + 0.12 * (cex * x + cey * y)
+
+    report = assess_runoff(
+        xy[:, 0], xy[:, 1], distances, design, lap, plane,
+        track_width_m=14, step_m=1000,
+    )
+    corner = report["corners"][0]
+    if abs(corner["max_long_slope"] - 0.12) > 1e-3 or abs(corner["max_cross_slope"]) > 1e-3:
+        fail(
+            f"escape-aligned plane corner 0 slopes "
+            f"{corner['max_long_slope']:.4f} / {corner['max_cross_slope']:.4f}"
+        )
+    if corner["reasons"] != ["long-slope"]:
+        fail(f"12% along the escape should fail only for long-slope, got {corner['reasons']}")
+    print("escape-aligned 12% grade fails for long-slope")
+    if skip_js:
+        return
+    compare(report, run_js("assess", payload_from(
+        xy, distances, design, lap,
+        {"kind": "plane", "z0": 100, "gx": 0.12 * cex, "gy": 0.12 * cey},
+        step_m=1000,
+    )), "diagonal-slope")
+
+
 def check_overlap(skip_js: bool) -> None:
     xy, distances, lap = overlap_track()
     design = np.full(len(xy), 50.0)
@@ -524,6 +606,8 @@ def main() -> int:
         fail("node not found: install Node.js 18+ or set SKIP_JS_PARITY=1")
     check_flat_and_cliff(skip_js)
     check_designed_edge(skip_js)
+    check_default_decel(skip_js)
+    check_diagonal_slope(skip_js)
     check_overlap(skip_js)
     check_trace_changes_depth(skip_js)
     print("fitting layouts...")

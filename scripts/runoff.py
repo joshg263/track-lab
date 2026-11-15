@@ -361,6 +361,36 @@ def _interior_samples(poly, spacing, sample_ground) -> list[tuple[int, int, floa
     return [(-1, -1, cx, cy, z)]
 
 
+def _partial(by_key, ix: int, iy: int, x: float, y: float, z: float, axis: int) -> float | None:
+    """One component of the terrain gradient, from the grid axis neighbours."""
+    if axis == 0:
+        fwd = by_key.get((ix + 1, iy))
+        back = by_key.get((ix - 1, iy))
+        here = x
+        coord = 0
+    else:
+        fwd = by_key.get((ix, iy + 1))
+        back = by_key.get((ix, iy - 1))
+        here = y
+        coord = 1
+    if fwd is not None and back is not None:
+        span = fwd[coord] - back[coord]
+        if abs(span) < 1e-9:
+            return None
+        return (fwd[2] - back[2]) / span
+    if fwd is not None:
+        span = fwd[coord] - here
+        if abs(span) < 1e-9:
+            return None
+        return (fwd[2] - z) / span
+    if back is not None:
+        span = here - back[coord]
+        if abs(span) < 1e-9:
+            return None
+        return (z - back[2]) / span
+    return None
+
+
 def _max_slopes(
     samples: list[tuple[int, int, float, float, float]],
     ex: float,
@@ -368,29 +398,26 @@ def _max_slopes(
     px: float,
     py: float,
 ) -> tuple[float, float]:
-    """Steepest rise/run along the escape and across it, from neighbouring samples."""
+    """Steepest rise/run along the escape and across it.
+
+    A neighbour pair is only one partial derivative. Both components are
+    rebuilt at a sample and then projected, so a grade that runs diagonally
+    across the grid is not split between the axes and under-counted.
+    """
     by_key = {(ix, iy): (x, y, z) for ix, iy, x, y, z in samples if ix >= 0}
     max_long = 0.0
     max_cross = 0.0
     for (ix, iy), (x, y, z) in by_key.items():
-        for neighbor in ((ix + 1, iy), (ix, iy + 1)):
-            other = by_key.get(neighbor)
-            if other is None:
-                continue
-            dx = other[0] - x
-            dy = other[1] - y
-            dist2 = dx * dx + dy * dy
-            if dist2 < 1e-12:
-                continue
-            dz = other[2] - z
-            gx = dz * dx / dist2
-            gy = dz * dy / dist2
-            long_slope = abs(gx * ex + gy * ey)
-            cross_slope = abs(gx * px + gy * py)
-            if long_slope > max_long:
-                max_long = long_slope
-            if cross_slope > max_cross:
-                max_cross = cross_slope
+        gx = _partial(by_key, ix, iy, x, y, z, 0)
+        gy = _partial(by_key, ix, iy, x, y, z, 1)
+        if gx is None or gy is None:
+            continue
+        long_slope = abs(gx * ex + gy * ey)
+        cross_slope = abs(gx * px + gy * py)
+        if long_slope > max_long:
+            max_long = long_slope
+        if cross_slope > max_cross:
+            max_cross = cross_slope
     return max_long, max_cross
 
 

@@ -299,7 +299,35 @@ function interiorSamples(poly, spacing, sampleGround) {
     return [[-1, -1, cx, cy, Number(sampleGround(cx, cy))]];
 }
 
+function axisPartial(byKey, ix, iy, x, y, z, axis) {
+    const plus = axis === 0 ? `${ix + 1}:${iy}` : `${ix}:${iy + 1}`;
+    const minus = axis === 0 ? `${ix - 1}:${iy}` : `${ix}:${iy - 1}`;
+    const fwd = byKey.get(plus);
+    const back = byKey.get(minus);
+    const coord = axis === 0 ? 2 : 3;
+    const here = axis === 0 ? x : y;
+    if (fwd && back) {
+        const span = fwd[coord] - back[coord];
+        if (Math.abs(span) < 1e-9) return null;
+        return (fwd[4] - back[4]) / span;
+    }
+    if (fwd) {
+        const span = fwd[coord] - here;
+        if (Math.abs(span) < 1e-9) return null;
+        return (fwd[4] - z) / span;
+    }
+    if (back) {
+        const span = here - back[coord];
+        if (Math.abs(span) < 1e-9) return null;
+        return (z - back[4]) / span;
+    }
+    return null;
+}
+
 function maxSlopes(samples, ex, ey, px, py) {
+    // A neighbour pair is only one partial derivative. Both components are
+    // rebuilt at a sample and then projected, so a diagonal grade is not
+    // split between the axes and under-counted.
     const byKey = new Map();
     for (const sample of samples) {
         if (sample[0] < 0) continue;
@@ -313,21 +341,13 @@ function maxSlopes(samples, ex, ey, px, py) {
         const x = sample[2];
         const y = sample[3];
         const z = sample[4];
-        for (const neighbor of [[ix + 1, iy], [ix, iy + 1]]) {
-            const other = byKey.get(`${neighbor[0]}:${neighbor[1]}`);
-            if (!other) continue;
-            const dx = other[2] - x;
-            const dy = other[3] - y;
-            const dist2 = dx * dx + dy * dy;
-            if (dist2 < 1e-12) continue;
-            const dz = other[4] - z;
-            const gx = dz * dx / dist2;
-            const gy = dz * dy / dist2;
-            const longSlope = Math.abs(gx * ex + gy * ey);
-            const crossSlope = Math.abs(gx * px + gy * py);
-            if (longSlope > maxLong) maxLong = longSlope;
-            if (crossSlope > maxCross) maxCross = crossSlope;
-        }
+        const gx = axisPartial(byKey, ix, iy, x, y, z, 0);
+        const gy = axisPartial(byKey, ix, iy, x, y, z, 1);
+        if (gx == null || gy == null) continue;
+        const longSlope = Math.abs(gx * ex + gy * ey);
+        const crossSlope = Math.abs(gx * px + gy * py);
+        if (longSlope > maxLong) maxLong = longSlope;
+        if (crossSlope > maxCross) maxCross = crossSlope;
     }
     return [maxLong, maxCross];
 }
@@ -350,7 +370,8 @@ function proxySpeed(radiusM, proxyLatG) {
 }
 
 export function assessRunoff(x, y, distances, designZ, lapM, sampleGround, options = {}) {
-    const decelG = Number(options.decelG) > 0.05 ? Number(options.decelG) : 0.05;
+    const requestedDecel = options.decelG == null ? DEFAULT_DECEL_G : Number(options.decelG);
+    const decelG = requestedDecel > 0.05 ? requestedDecel : 0.05;
     const widthM = Number(options.widthM) >= 5 ? Number(options.widthM) : DEFAULT_WIDTH_M;
     const slopeLimit = options.slopeLimit ?? DEFAULT_SLOPE_LIMIT;
     const stepM = options.stepM ?? DEFAULT_STEP_M;

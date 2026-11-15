@@ -58,6 +58,12 @@ function groundFromSpec(spec, sampleZ) {
         const axis = spec.axis === 'y' ? 'y' : 'x';
         return (x, y) => ((axis === 'x' ? x : y) > cut ? low : high);
     }
+    if (spec.kind === 'plane') {
+        const z0 = Number.isFinite(spec.z0) ? spec.z0 : 0;
+        const gx = Number.isFinite(spec.gx) ? spec.gx : 0;
+        const gy = Number.isFinite(spec.gy) ? spec.gy : 0;
+        return (x, y) => z0 + gx * x + gy * y;
+    }
     if (spec.kind === 'dem') return sampleZ;
     if (spec.kind === 'zones') return zoneGround(spec);
     throw new Error('unknown ground ' + spec.kind);
