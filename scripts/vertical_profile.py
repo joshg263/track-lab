@@ -46,6 +46,18 @@ GRAD_REPS = 40
 PULL_STEPS = 8
 PULL_ALPHA = 0.35
 FINAL_CURV_REPS = 60
+# After the fixed sweeps, keep projecting until the tightened grade and
+# curvature limits hold, or a sweep block stops moving the profile (the depth
+# box is in the way). A feasible profile must not be returned still violated.
+FEAS_MAX_SWEEPS = 6000
+FEAS_CHECK_EVERY = 25
+FEAS_SLACK = 1e-8
+# Two windows with almost no residual drop, while the depth box is holding
+# stations, means the cap makes the limits impossible. Hitting the sweep cap
+# while the residual is still falling is a different outcome.
+FEAS_STUCK_EVERY = 100
+FEAS_STUCK_WINDOWS = 2
+FEAS_STUCK_FRACTION = 0.01
 
 # 1 vertical : 2 horizontal.
 SIDE_SLOPE = 0.5
@@ -170,6 +182,39 @@ def _clip_box(z: np.ndarray, box_lo: np.ndarray, box_hi: np.ndarray) -> np.ndarr
     return np.minimum(np.maximum(z, box_lo), box_hi)
 
 
+def _constraint_excess(z: np.ndarray, limit: float, c_lo: float, c_hi: float) -> float:
+    """Largest grade or curvature overshoot, in metres over one spacing.
+
+    Non-positive means the tightened limits hold. The JS port reduces the
+    same three quantities with a running maximum.
+    """
+    zp = np.empty_like(z)
+    zm = np.empty_like(z)
+    zp[:-1] = z[1:]
+    zp[-1] = z[0]
+    zm[1:] = z[:-1]
+    zm[0] = z[-1]
+    delta = zp - 2.0 * z + zm
+    grade = np.abs(zp - z)
+    excess = float(np.max(delta - c_lo))
+    under = float(np.max(-c_hi - delta))
+    if under > excess:
+        excess = under
+    over = float(np.max(grade - limit))
+    if over > excess:
+        excess = over
+    return excess
+
+
+def _cap_status(depth: float) -> str:
+    """Residual remains and the depth box is what stopped the solve."""
+    return f"infeasible within the {depth:g} m cap"
+
+
+def _depth_pinned(z: np.ndarray, terrain: np.ndarray, depth: float) -> bool:
+    return bool(np.any(np.abs(z - terrain) >= depth - DEPTH_ACTIVE_M))
+
+
 def fit_profile(
     terrain_z: np.ndarray,
     spacing_m: float,
@@ -178,12 +223,18 @@ def fit_profile(
     max_cut_fill_m: float = DEFAULT_MAX_CUT_FILL_M,
     min_crest_radius_m: float = DEFAULT_MIN_CREST_RADIUS_M,
     min_dip_radius_m: float = DEFAULT_MIN_DIP_RADIUS_M,
-) -> np.ndarray:
+    max_sweeps: int | None = None,
+) -> tuple[np.ndarray, str]:
     """
-    Designed elevations on the same grid as terrain_z.
+    Designed elevations on the same grid as terrain_z, and a solve status.
 
     max_grade is a fraction (0.12 for 12%), not a percent.
     The depth box is hard. Grade and radius are met wherever the box allows.
+
+    Status is "converged" when the tightened residuals are under FEAS_SLACK,
+    "infeasible within the {cap} m cap" when the depth box stops further
+    progress with a residual still present, or "not converged" when the
+    iteration cap is hit first. Those last two are different outcomes.
     """
     terrain = np.asarray(terrain_z, dtype=np.float64)
     n = terrain.shape[0]
@@ -236,7 +287,44 @@ def fit_profile(
     curvature(FINAL_CURV_REPS)
     # The depth box is the one limit that is never traded away.
     z = _clip_box(z, box_lo, box_hi)
-    return z
+    # Convergence phase. Stop on the residual, on a depth box that will not
+    # move, or on the iteration cap. The cap is "not converged", not a claim
+    # that the profile is infeasible.
+    cap = FEAS_MAX_SWEEPS if max_sweeps is None else int(max_sweeps)
+    if cap < 0:
+        raise ValueError("max sweeps must be non-negative")
+    status = "not converged"
+    excess = _constraint_excess(z, limit, c_lo, c_hi)
+    if excess <= FEAS_SLACK:
+        status = "converged"
+    else:
+        window_excess = excess
+        stuck_windows = 0
+        for sweep in range(1, cap + 1):
+            z = _curvature_pass(z, box_lo, box_hi, c_lo, c_hi)
+            _gradient_pass(z, box_lo, box_hi, limit)
+            z = _clip_box(z, box_lo, box_hi)
+            if sweep % FEAS_CHECK_EVERY != 0 and sweep != cap:
+                continue
+            excess = _constraint_excess(z, limit, c_lo, c_hi)
+            if excess <= FEAS_SLACK:
+                status = "converged"
+                break
+            if sweep % FEAS_STUCK_EVERY == 0:
+                drop = window_excess - excess
+                pinned = _depth_pinned(z, terrain, depth)
+                if pinned and drop <= FEAS_STUCK_FRACTION * abs(window_excess):
+                    stuck_windows += 1
+                else:
+                    stuck_windows = 0
+                window_excess = excess
+                if stuck_windows >= FEAS_STUCK_WINDOWS:
+                    status = _cap_status(depth)
+                    break
+            if sweep == cap:
+                status = "not converged"
+                break
+    return z, status
 
 
 def station_geometry(z: np.ndarray, spacing_m: float) -> dict:
@@ -468,7 +556,10 @@ def _section_areas(
         info = left if lateral >= 0.0 else right
         outward = ad - half_m
         reach_out = info["reach_m"] - half_m
-        if outward >= reach_out - 1e-6:
+        # Daylight is a real intersection, so the catch point sits on the ground.
+        # An open side is only the 80 m truncation: keep the 1:2 elevation there,
+        # or the last trapezoid is forced shut and the wedge is undercounted.
+        if info["daylight"] and outward >= reach_out - 1e-6:
             return ground_at(lateral)
         return z_design + info["slope_sign"] * outward * SIDE_SLOPE
 
@@ -556,6 +647,8 @@ def design_sections(
             "half_m": half,
             "left": left,
             "right": right,
+            # Open means the 1:2 slope is still clear of the ground at 80 m.
+            "open": not left["daylight"] or not right["daylight"],
         })
     return sections
 
@@ -613,6 +706,7 @@ def earthworks(
         "fill_m3": fill_m3,
         "total_m3": cut_m3 + fill_m3,
         "daylight_miss_m": daylight_miss,
+        "open_m": daylight_miss,
         "side_slope": "1:2",
         "sections": sections,
     }
@@ -643,7 +737,7 @@ def build_vertical_profile(
     stations, terrain_u, spacing = resample_closed(distances, terrain_z, lap_m, n)
     _, x_u, _ = resample_closed(distances, x, lap_m, n)
     _, y_u, _ = resample_closed(distances, y, lap_m, n)
-    design_u = fit_profile(
+    design_u, solve_status = fit_profile(
         terrain_u,
         spacing,
         max_grade=max_grade,
@@ -686,7 +780,8 @@ def build_vertical_profile(
         "earthworks": {k: v for k, v in works.items() if k != "sections"},
         "sections": works["sections"],
         "bindings": runs,
-        "feasible": len(violated) == 0,
+        "feasible": len(violated) == 0 and solve_status == "converged",
+        "solve_status": solve_status,
         "join_step_m": float(design_u[0] - design_u[-1]),
     }
 

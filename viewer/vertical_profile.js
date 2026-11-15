@@ -17,6 +17,18 @@ export const GRAD_REPS = 40;
 export const PULL_STEPS = 8;
 export const PULL_ALPHA = 0.35;
 export const FINAL_CURV_REPS = 60;
+// After the fixed sweeps, keep projecting until the tightened grade and
+// curvature limits hold, or a sweep block stops moving the profile (the depth
+// box is in the way). A feasible profile must not be returned still violated.
+export const FEAS_MAX_SWEEPS = 6000;
+export const FEAS_CHECK_EVERY = 25;
+export const FEAS_SLACK = 1e-8;
+// Two windows with almost no residual drop, while the depth box is holding
+// stations, means the cap makes the limits impossible. Hitting the sweep cap
+// while the residual is still falling is a different outcome.
+export const FEAS_STUCK_EVERY = 100;
+export const FEAS_STUCK_WINDOWS = 2;
+export const FEAS_STUCK_FRACTION = 0.01;
 
 export const SIDE_SLOPE = 0.5;
 export const CATCH_STEP_M = 2.0;
@@ -155,6 +167,38 @@ function clipBox(z, boxLo, boxHi) {
     return out;
 }
 
+function capStatus(depth) {
+    return `infeasible within the ${depth} m cap`;
+}
+
+function depthPinned(z, terrain, depth) {
+    const limit = depth - DEPTH_ACTIVE_M;
+    for (let i = 0; i < z.length; i++) {
+        const d = z[i] - terrain[i];
+        const ad = d >= 0 ? d : -d;
+        if (ad >= limit) return true;
+    }
+    return false;
+}
+
+function constraintExcess(z, limit, cLo, cHi) {
+    const n = z.length;
+    let excess = -Infinity;
+    for (let i = 0; i < n; i++) {
+        const nxt = i + 1 === n ? 0 : i + 1;
+        const prv = i === 0 ? n - 1 : i - 1;
+        const delta = z[nxt] - 2 * z[i] + z[prv];
+        const grade = Math.abs(z[nxt] - z[i]);
+        const over = delta - cLo;
+        const under = -cHi - delta;
+        const gOver = grade - limit;
+        if (over > excess) excess = over;
+        if (under > excess) excess = under;
+        if (gOver > excess) excess = gOver;
+    }
+    return excess;
+}
+
 export function fitProfile(terrainZ, spacingM, options = {}) {
     const terrain = terrainZ;
     const n = terrain.length;
@@ -164,7 +208,9 @@ export function fitProfile(terrainZ, spacingM, options = {}) {
     const crestR = options.minCrestRadiusM ?? DEFAULT_MIN_CREST_RADIUS_M;
     const dipR = options.minDipRadiusM ?? DEFAULT_MIN_DIP_RADIUS_M;
     const maxGrade = options.maxGrade;
+    const maxSweeps = options.maxSweeps == null ? FEAS_MAX_SWEEPS : options.maxSweeps;
     if (!(depth >= 0)) throw new Error('cut/fill cap must be non-negative');
+    if (!(maxSweeps >= 0)) throw new Error('max sweeps must be non-negative');
     if (!(crestR > 0) || !(dipR > 0)) throw new Error('vertical-curve radii must be positive');
     const gradeLimit = maxGrade / LIMIT_TIGHTEN;
     if (!(gradeLimit >= 0)) throw new Error('max grade must be non-negative');
@@ -204,7 +250,48 @@ export function fitProfile(terrainZ, spacingM, options = {}) {
     gradient(GRAD_REPS);
     curvature(FINAL_CURV_REPS);
     z = clipBox(z, boxLo, boxHi);
-    return z;
+    // Convergence phase. Stop on the residual, on a depth box that will not
+    // move, or on the iteration cap. The cap is "not converged", not a claim
+    // that the profile is infeasible.
+    const cap = maxSweeps;
+    let solveStatus = 'not converged';
+    let excess = constraintExcess(z, limit, cLo, cHi);
+    if (excess <= FEAS_SLACK) {
+        solveStatus = 'converged';
+    } else {
+        let windowExcess = excess;
+        let stuckWindows = 0;
+        for (let sweep = 1; sweep <= cap; sweep++) {
+            z = curvaturePass(z, boxLo, boxHi, cLo, cHi);
+            gradientPass(z, boxLo, boxHi, limit);
+            z = clipBox(z, boxLo, boxHi);
+            if (sweep % FEAS_CHECK_EVERY !== 0 && sweep !== cap) continue;
+            excess = constraintExcess(z, limit, cLo, cHi);
+            if (excess <= FEAS_SLACK) {
+                solveStatus = 'converged';
+                break;
+            }
+            if (sweep % FEAS_STUCK_EVERY === 0) {
+                const drop = windowExcess - excess;
+                const pinned = depthPinned(z, terrain, depth);
+                if (pinned && drop <= FEAS_STUCK_FRACTION * Math.abs(windowExcess)) {
+                    stuckWindows += 1;
+                } else {
+                    stuckWindows = 0;
+                }
+                windowExcess = excess;
+                if (stuckWindows >= FEAS_STUCK_WINDOWS) {
+                    solveStatus = capStatus(depth);
+                    break;
+                }
+            }
+            if (sweep === cap) {
+                solveStatus = 'not converged';
+                break;
+            }
+        }
+    }
+    return { z, solve_status: solveStatus };
 }
 
 export function stationGeometry(z, spacingM) {
@@ -402,7 +489,10 @@ function sectionAreas(sampleGround, x, y, nx, ny, halfM, zDesign, left, right) {
         const info = lateral >= 0 ? left : right;
         const outward = ad - halfM;
         const reachOut = info.reach_m - halfM;
-        if (outward >= reachOut - 1e-6) return groundAt(lateral);
+        // Daylight is a real intersection, so the catch point sits on the ground.
+        // An open side is only the 80 m truncation: keep the 1:2 elevation there,
+        // or the last trapezoid is forced shut and the wedge is undercounted.
+        if (info.daylight && outward >= reachOut - 1e-6) return groundAt(lateral);
         return zDesign + info.slope_sign * outward * SIDE_SLOPE;
     };
     const latMin = -right.reach_m;
@@ -485,6 +575,7 @@ export function designSections(x, y, designZ, widthM, sampleGround) {
             left: catchSide(sampleGround, zx, zy, nx, ny, 1, half, zd),
             right: catchSide(sampleGround, zx, zy, nx, ny, -1, half, zd),
         };
+        sections[i].open = !sections[i].left.daylight || !sections[i].right.daylight;
     }
     return sections;
 }
@@ -518,6 +609,7 @@ export function earthworks(x, y, terrainZ, designZ, spacingM, widthM, sampleGrou
         fill_m3: fillM3,
         total_m3: cutM3 + fillM3,
         daylight_miss_m: daylightMiss,
+        open_m: daylightMiss,
         side_slope: '1:2',
         sections,
     };
@@ -583,7 +675,8 @@ export function buildVerticalProfile(x, y, distances, terrainZ, lapM, widthM, sa
         minCrestRadiusM,
         minDipRadiusM,
     };
-    const designZ = fitProfile(terrainGrid.values, terrainGrid.spacing, limits);
+    const solved = fitProfile(terrainGrid.values, terrainGrid.spacing, limits);
+    const designZ = solved.z;
     const designAtPoints = interpClosed(terrainGrid.stations, designZ, lapM, distances);
     const reportOptions = {
         maxGrade,
@@ -622,11 +715,13 @@ export function buildVerticalProfile(x, y, distances, terrainZ, lapM, widthM, sa
             fill_m3: works.fill_m3,
             total_m3: works.total_m3,
             daylight_miss_m: works.daylight_miss_m,
+            open_m: works.open_m,
             side_slope: works.side_slope,
         },
         sections: works.sections,
         bindings,
-        feasible: violated.length === 0,
+        feasible: violated.length === 0 && solved.solve_status === 'converged',
+        solve_status: solved.solve_status,
         join_step_m: designZ[0] - designZ[n - 1],
     };
 }

@@ -462,6 +462,7 @@
         const _rayOrigin = new THREE.Vector3();
         const _down = new THREE.Vector3(0, -1, 0);
         const EYE_HEIGHT_M = 1.1;
+        const CAR_CENTRE_M = 0.525;
         const STAND_EYE_M = 1.7;
         const NOMINAL_SPEED_MPS = 120 / 3.6;
         const ONBOARD_FOV = 70;
@@ -820,22 +821,28 @@
                 const localY = (elev) => elev - baseElevation;
                 const designed = designEnabled() && verticalProfile;
                 
-                const edge = (w, drop) => {
+                const edge = (w, drop, onDeck) => {
                     const lx = p.x + nx * w, ly = p.y + ny * w;
                     const rx = p.x - nx * w, ry = p.y - ny * w;
-                    // Drive views sit on the rendered triangles. The overview ribbon
-                    // sits on the designed deck, or on the terrain sample when that is off.
-                    const lz = eye
-                        ? meshElevation(lx, ly)
-                        : (designed ? centerZ : Math.max(sampleTerrain(lx, ly), centerZ));
-                    const rz = eye
-                        ? meshElevation(rx, ry)
-                        : (designed ? centerZ : Math.max(sampleTerrain(rx, ry), centerZ));
+                    // The deck, from edge to edge, is the designed centreline height.
+                    // Sampling the blended terrain mesh here walks off that height.
+                    let lz;
+                    let rz;
+                    if (designed && onDeck) {
+                        lz = centerZ;
+                        rz = centerZ;
+                    } else if (eye) {
+                        lz = meshElevation(lx, ly);
+                        rz = meshElevation(rx, ry);
+                    } else {
+                        lz = Math.max(sampleTerrain(lx, ly), centerZ);
+                        rz = Math.max(sampleTerrain(rx, ry), centerZ);
+                    }
                     return [lx, localY(lz) + lift - drop, -ly, rx, localY(rz) + lift - drop, -ry];
                 };
                 
-                outlineVerts.push(...edge(outlineWidth, outlineDrop));
-                trackVerts.push(...edge(halfWidth, 0));
+                outlineVerts.push(...edge(outlineWidth, outlineDrop, false));
+                trackVerts.push(...edge(halfWidth, 0, true));
             }
             
             const indices = [];
@@ -897,10 +904,13 @@
                 driveProfile = null;
                 return;
             }
+            const designed = designEnabled() && verticalProfile;
             driveProfile = buildDriveProfile(layoutPoints, {
                 lapLengthM: liveMetrics.lapLengthM,
                 trackWidthM: trackWidthM(),
-                sampleZ: designEnabled() && verticalProfile ? deckElevation : sampleZ,
+                // Designed gradient uses centreline z(s). The deck is flat, so the
+                // racing line is at that height rather than a mesh sample.
+                sampleZ: designed ? null : sampleZ,
                 ...readCarInputs(),
             });
         }
@@ -923,9 +933,9 @@
                 const ny = dx / len;
                 const designed = designEnabled() && verticalProfile;
                 const place = (x, y) => {
-                    const z = eye
-                        ? meshElevation(x, y)
-                        : (designed ? p.z : Math.max(sampleTerrain(x, y), p.z));
+                    const z = designed
+                        ? p.z
+                        : (eye ? meshElevation(x, y) : Math.max(sampleTerrain(x, y), p.z));
                     return [x, z - baseElevation + lift + 0.28, -y];
                 };
                 verts.push(...place(p.x + nx * half, p.y + ny * half));
@@ -965,7 +975,7 @@
             const dy = p1.y - p0.y;
             const eye = driveView();
             const lift = eye ? 0.35 : RIBBON_OFFSET;
-            const surface = eye ? meshElevation(p0.x, p0.y) : p0.z;
+            const surface = (designEnabled() && verticalProfile) || !eye ? p0.z : meshElevation(p0.x, p0.y);
             const y = surface - baseElevation + lift + (eye ? 0.15 : 0.5);
             
             const geometry = new THREE.PlaneGeometry(trackWidthM() + 4, 3);
@@ -1443,33 +1453,6 @@
             liveMetrics.designGradientPct = maxAbsGradientPct(graded.gradients);
         }
 
-        function deckElevation(x, y) {
-            const pts = layoutPoints;
-            if (!pts || pts.length < 2) return sampleZ(x, y);
-            const n = pts.length;
-            let best = Infinity;
-            let bestZ = pts[0].z;
-            for (let i = 0; i < n; i++) {
-                const j = (i + 1) % n;
-                const ax = pts[i].x;
-                const ay = pts[i].y;
-                const dx = pts[j].x - ax;
-                const dy = pts[j].y - ay;
-                const len2 = dx * dx + dy * dy;
-                let t = len2 > 1e-8 ? ((x - ax) * dx + (y - ay) * dy) / len2 : 0;
-                if (t < 0) t = 0;
-                else if (t > 1) t = 1;
-                const px = ax + dx * t;
-                const py = ay + dy * t;
-                const d2 = (x - px) * (x - px) + (y - py) * (y - py);
-                if (d2 < best) {
-                    best = d2;
-                    bestZ = pts[i].z + (pts[j].z - pts[i].z) * t;
-                }
-            }
-            return bestZ;
-        }
-
         function ensureDisplayHeights() {
             if (!terrain) return;
             if (!terrain.displayHeights || terrain.displayHeights.length !== terrain.heights.length) {
@@ -1640,11 +1623,14 @@
             stroke(designZ, '#7dffb3', 1.5);
             if (note) {
                 const ew = profile.earthworks;
-                const open = ew.daylight_miss_m?.length || 0;
-                const openText = open ? ` ${open} stations are still open at ${MAX_CATCH_M.toFixed(0)} m.` : '';
+                const open = ew.open_m?.length || ew.daylight_miss_m?.length || 0;
+                const openText = open ? ` ${open} stations flagged open at ${MAX_CATCH_M.toFixed(0)} m.` : '';
+                const solve = profile.solve_status && profile.solve_status !== 'converged'
+                    ? ` ${profile.solve_status}.`
+                    : '';
                 note.textContent =
                     `Cut ${ew.max_cut_m.toFixed(1)} m / ${Math.round(ew.cut_m3)} m³, `
-                    + `fill ${ew.max_fill_m.toFixed(1)} m / ${Math.round(ew.fill_m3)} m³.${openText} `
+                    + `fill ${ew.max_fill_m.toFixed(1)} m / ${Math.round(ew.fill_m3)} m³.${openText}${solve} `
                     + bindingBrief(profile.bindings);
             }
         }
@@ -2148,13 +2134,21 @@
             return { ...p, speedMps: NOMINAL_SPEED_MPS, state: 'coast', gradientPct: 0 };
         }
 
+        function designedCentreZ(distance) {
+            if (!designEnabled() || !verticalProfile) return null;
+            const c = sampleCentreline(distance);
+            return c ? c.z : null;
+        }
+
         function onboardStation(distance) {
             const p = drivePoint(distance);
             if (!p) return null;
-            const ground = meshElevation(p.x, p.y);
+            const designedZ = designedCentreZ(distance);
+            const ground = designedZ != null ? designedZ : meshElevation(p.x, p.y);
             const scale = world?.scale.y || 1;
             return {
                 ...p,
+                z: designedZ != null ? designedZ : p.z,
                 ground,
                 eye: ground + EYE_HEIGHT_M,
                 sceneX: p.x,
@@ -2203,14 +2197,15 @@
                 carMarker.visible = false;
                 return;
             }
-            const ground = meshElevation(p.x, p.y);
+            const designedZ = designedCentreZ(driveDistance);
+            const ground = designedZ != null ? designedZ : meshElevation(p.x, p.y);
             const scaleY = world?.scale.y || 1;
             const worldPos = new THREE.Vector3(
                 p.x,
-                (ground - baseElevation + 0.525) * scaleY,
+                (ground - baseElevation + CAR_CENTRE_M) * scaleY,
                 -p.y,
             );
-            carMarker.position.set(p.x, ground - baseElevation + 0.525, -p.y);
+            carMarker.position.set(p.x, ground - baseElevation + CAR_CENTRE_M, -p.y);
             const fwd = carForward(driveDistance);
             carMarker.rotation.set(0, Math.atan2(fwd.x, fwd.z), 0);
             // The onboard camera is the driver's eye, a few centimetres above this roof.
@@ -2605,8 +2600,11 @@
             for (let d = 0; d < lap; d += step) {
                 const eye = onboardStation(d);
                 if (!eye) continue;
-                const hit = raycastSceneY(eye.x, eye.y);
-                const groundY = hit == null ? sceneY(eye.ground) : hit;
+                const designZ = designedCentreZ(d);
+                const hit = designZ == null ? raycastSceneY(eye.x, eye.y) : null;
+                const groundY = designZ != null
+                    ? sceneY(designZ)
+                    : (hit == null ? sceneY(eye.ground) : hit);
                 const clearance = (eye.sceneY - groundY) / scale;
                 samples++;
                 if (clearance < minC) {
@@ -2639,10 +2637,43 @@
         function clearanceUnderCamera() {
             if (!camera) return null;
             const scale = world.scale.y || 1;
+            if (cameraMode === 'onboard') {
+                const designZ = designedCentreZ(driveDistance);
+                if (designZ != null) return (camera.position.y - sceneY(designZ)) / scale;
+            }
             if (terrainMesh) terrainMesh.updateWorldMatrix(true, true);
             const hit = raycastSceneY(camera.position.x, -camera.position.z);
             if (hit == null) return null;
             return (camera.position.y - hit) / scale;
+        }
+
+        function maxMarkerDesignError(stepM = 10) {
+            if (!layoutPoints || !liveMetrics || !designEnabled() || !verticalProfile) return null;
+            const lap = liveMetrics.lapLengthM;
+            const step = Math.max(1, stepM);
+            const scale = world?.scale.y || 1;
+            const saved = driveDistance;
+            let worst = 0;
+            let at = 0;
+            let samples = 0;
+            for (let d = 0; d < lap; d += step) {
+                const designZ = designedCentreZ(d);
+                if (designZ == null) continue;
+                driveDistance = d;
+                updateCarMarker();
+                const marker = markerWorld();
+                if (!marker) continue;
+                const elev = baseElevation + marker.y / scale - CAR_CENTRE_M;
+                const err = Math.abs(elev - designZ);
+                samples++;
+                if (err > worst) {
+                    worst = err;
+                    at = d;
+                }
+            }
+            driveDistance = saved;
+            updateCarMarker();
+            return { maxAbsM: worst, atM: at, samples };
         }
 
         async function init() {
@@ -2744,6 +2775,8 @@
                         fillM3: ew.fill_m3,
                         joinStepM: verticalProfile.join_step_m,
                         bindingCount: verticalProfile.bindings.length,
+                        solveStatus: verticalProfile.solve_status,
+                        openStations: verticalProfile.earthworks.open_m?.length || 0,
                         note: document.getElementById('profile-note')?.textContent || '',
                     };
                 },
@@ -2815,6 +2848,7 @@
                 probeOnboardClearance,
                 clearanceUnderCamera,
                 markerWorld,
+                maxMarkerDesignError,
                 cameraState() {
                     return {
                         x: camera.position.x,

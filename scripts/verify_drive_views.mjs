@@ -112,6 +112,11 @@ await page.click('#btn-cam-onboard');
 await page.waitForFunction(() => window.__tracklab.getStats().cameraMode === 'onboard');
 const reportA = await page.evaluate(() => window.__tracklab.probeOnboardClearance(5));
 assertClearance('layout A', reportA);
+const markerA = await page.evaluate(() => window.__tracklab.maxMarkerDesignError(10));
+console.log('layout A marker vs design', JSON.stringify(markerA));
+if (!markerA || !(markerA.samples > 100) || !(markerA.maxAbsM <= 0.1)) {
+    throw new Error(`layout A marker is ${markerA?.maxAbsM} m off design z at ${markerA?.atM} m`);
+}
 const summaryA = await page.evaluate(() => window.__tracklab.profileSummary());
 console.log('layout A profile', JSON.stringify(summaryA));
 if (!summaryA || !(summaryA.maxSpeedKmh - summaryA.minSpeedKmh > 20)) {
@@ -149,6 +154,9 @@ if (Math.abs(moved.distanceM - moved.target) > 2) {
 }
 if (!(moved.clearance >= 1.0)) throw new Error('camera under the scrubbed view is below the terrain');
 
+await page.evaluate((d) => window.__tracklab.setDriveDistance(d, true), 2056);
+await page.waitForTimeout(400);
+await page.screenshot({ path: join(root, 'docs/onboard_after.png') });
 await page.evaluate((d) => window.__tracklab.setDriveDistance(d, true), Math.round(reportA.lapLengthM * 0.22));
 await page.evaluate(() => document.getElementById('speed-trace').scrollIntoView({ block: 'center' }));
 await page.waitForTimeout(350);
@@ -236,8 +244,9 @@ await page.screenshot({ path: join(root, 'docs/helicopter.png') });
 await page.evaluate(() => {
     const s = document.getElementById('layout-select');
     s.size = s.options.length;
+    s.scrollIntoView({ block: 'center' });
 });
-await page.waitForTimeout(200);
+await page.waitForTimeout(500);
 await page.screenshot({ path: join(root, 'docs/layout_dropdown_version1.png') });
 await page.evaluate(() => {
     document.getElementById('layout-select').removeAttribute('size');
@@ -269,6 +278,11 @@ await page.click('#btn-cam-onboard');
 await page.waitForFunction(() => window.__tracklab.getStats().cameraMode === 'onboard');
 const report2 = await page.evaluate(() => window.__tracklab.probeOnboardClearance(5));
 assertClearance('version-2', report2);
+const marker2 = await page.evaluate(() => window.__tracklab.maxMarkerDesignError(10));
+console.log('version-2 marker vs design', JSON.stringify(marker2));
+if (!marker2 || !(marker2.samples > 100) || !(marker2.maxAbsM <= 0.1)) {
+    throw new Error(`version-2 marker is ${marker2?.maxAbsM} m off design z at ${marker2?.atM} m`);
+}
 await page.evaluate((d) => window.__tracklab.setDriveDistance(d, true), Math.round(report2.lapLengthM * 0.28));
 await page.evaluate(() => document.getElementById('speed-trace').scrollIntoView({ block: 'center' }));
 await page.waitForTimeout(450);

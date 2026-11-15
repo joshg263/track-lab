@@ -45,6 +45,7 @@ from vertical_profile import (  # noqa: E402
     GRADIENT_MARGIN,
     binding_report,
     build_vertical_profile,
+    earthworks,
     fit_profile,
     geometry_summary,
     violations_are_reported,
@@ -114,7 +115,9 @@ def check_bump() -> None:
         return amp * np.exp(-0.5 * (d / sigma) ** 2)
 
     terrain = 100.0 + bump(1000, 40, 3) + bump(2500, 90, 2.5)
-    design = fit_profile(terrain, ds, max_grade=0.12)
+    design, status = fit_profile(terrain, ds, max_grade=0.12)
+    if status != "converged":
+        fail(f"bump solve status {status}")
     summary = geometry_summary(design, ds)
     body = {
         "terrain": terrain.tolist(),
@@ -128,6 +131,8 @@ def check_bump() -> None:
     err = float(np.max(np.abs(np.array(got["design"]) - design)))
     if err > Z_TOL_M:
         fail(f"bump Python/JS elevation differs by {err:.3e} m")
+    if got["solve_status"] != "converged":
+        fail(f"bump JS solve status {got['solve_status']}")
     if got["gaps"]:
         fail(f"bump JS left a gap: {got['gaps'][0]}")
     if got["runs"]:
@@ -144,6 +149,112 @@ def check_bump() -> None:
     )
 
 
+def check_feasible_wave() -> None:
+    """A wave inside the depth cap has a feasible flat profile, so it must clear."""
+    n = 1000
+    ds = 4.0
+    s = np.arange(n) * ds
+    terrain = 100.0 + 6.0 * np.sin(2.0 * np.pi * s / 200.0)
+    short, short_status = fit_profile(terrain, ds, max_grade=0.12, max_sweeps=1)
+    if short_status != "not converged":
+        fail(f"wave with one sweep should be not converged, got {short_status}")
+    short_summary = geometry_summary(short, ds)
+    if (
+        short_summary["min_crest_radius_m"] is not None
+        and short_summary["min_crest_radius_m"] >= 1000
+        and short_summary["min_dip_radius_m"] is not None
+        and short_summary["min_dip_radius_m"] >= 600
+    ):
+        fail("one sweep already cleared the wave; the cap test no longer separates outcomes")
+    design, status = fit_profile(terrain, ds, max_grade=0.12)
+    if status != "converged":
+        fail(f"wave solve status {status}")
+    runs = binding_report(
+        terrain,
+        design,
+        ds,
+        max_grade=0.12,
+        max_cut_fill_m=DEFAULT_MAX_CUT_FILL_M,
+        min_crest_radius_m=DEFAULT_MIN_CREST_RADIUS_M,
+        min_dip_radius_m=DEFAULT_MIN_DIP_RADIUS_M,
+    )
+    assert_limits_or_bindings("wave", terrain, design, ds, runs)
+    violated = [r for r in runs if r["status"] == "violated"]
+    if violated:
+        fail(f"wave is feasible within the depth cap but reported {violated[0]['kind']}")
+    summary = geometry_summary(design, ds)
+    if summary["min_crest_radius_m"] < 1000 or summary["min_dip_radius_m"] < 600:
+        fail(
+            f"wave radii crest {summary['min_crest_radius_m']:.0f} "
+            f"dip {summary['min_dip_radius_m']:.0f}"
+        )
+    got = run_js("fit", {
+        "terrain": terrain.tolist(),
+        "spacing": ds,
+        "maxGrade": 0.12,
+        "maxCutFillM": 6,
+        "minCrestRadiusM": 1000,
+        "minDipRadiusM": 600,
+    })
+    err = float(np.max(np.abs(np.array(got["design"]) - design)))
+    if err > Z_TOL_M:
+        fail(f"wave Python/JS elevation differs by {err:.3e} m")
+    if got["solve_status"] != "converged":
+        fail(f"wave JS solve status {got['solve_status']}")
+    if any(r["status"] == "violated" for r in got["runs"]):
+        fail(f"wave JS reported a violation on a feasible profile: {got['runs'][0]}")
+    capped = run_js("fit", {
+        "terrain": terrain.tolist(),
+        "spacing": ds,
+        "maxGrade": 0.12,
+        "maxCutFillM": 6,
+        "minCrestRadiusM": 1000,
+        "minDipRadiusM": 600,
+        "maxSweeps": 1,
+    })
+    if capped["solve_status"] != "not converged":
+        fail(f"wave JS one-sweep status {capped['solve_status']}")
+    if capped["solve_status"] == "infeasible within the 6 m cap":
+        fail("wave JS reported the depth cap for a profile that had not converged")
+    print(
+        f"wave: crest {summary['min_crest_radius_m']:.0f} m "
+        f"dip {summary['min_dip_radius_m']:.0f} m, status {status}, Python/JS |dz| {err:.1e} m"
+    )
+
+
+def check_open_boundary() -> None:
+    """A side that never daylights keeps the 1:2 face in the end strip."""
+    width = 14.0
+    n = 4
+    x = np.arange(n, dtype=np.float64)
+    y = np.zeros(n, dtype=np.float64)
+    design = np.zeros(n, dtype=np.float64)
+
+    def ground(_x, py):
+        return 6.0 + abs(float(py))
+
+    works = earthworks(x, y, design, design, 1.0, width, ground)
+    area = works["cut_m3"] / n
+    # 14 m deck at 0, ground 6 + |lateral|, open at 80 m. The last strip stays
+    # on the slope, so the section is 5413 m² of cut rather than 5307.
+    if abs(area - 5413.0) > 1.0:
+        fail(f"open boundary cut area {area:.2f} m², expected 5413")
+    if works["fill_m3"] > 1e-6:
+        fail(f"open boundary fill {works['fill_m3']:.3e} m³ should be zero")
+    if any(s["left"]["daylight"] or s["right"]["daylight"] for s in works["sections"]):
+        fail("open boundary fixture daylit inside 80 m")
+    if not works["open_m"] or not all(s["open"] for s in works["sections"]):
+        fail("open boundary stations are not flagged open in the volume report")
+    got = run_js("section", {"width": width, "z": 0.0, "offset": 6.0})
+    if abs(got["per_section_cut"] - area) > VOLUME_TOL_M3:
+        fail(
+            f"open boundary Python/JS cut differs: {area:.4f} vs {got['per_section_cut']:.4f}"
+        )
+    if got["left_daylight"] or got["right_daylight"] or not got["open"]:
+        fail("JS open boundary fixture was not flagged open")
+    print(f"open boundary: cut {area:.2f} m², still open at 80 m, Python/JS agree")
+
+
 def check_infeasible_hill() -> None:
     n = 500
     lap = 4000.0
@@ -151,7 +262,11 @@ def check_infeasible_hill() -> None:
     s = np.arange(n) * ds
     # 100 m over 400 m. Six metres of cut and fill cannot bring this under 12%.
     terrain = 100.0 + 100.0 * np.clip(1.0 - np.abs(s - 1000.0) / 200.0, 0.0, 1.0)
-    design = fit_profile(terrain, ds, max_grade=0.12)
+    design, status = fit_profile(terrain, ds, max_grade=0.12)
+    if status != "infeasible within the 6 m cap":
+        fail(f"hill solve status {status}")
+    if status == "not converged":
+        fail("hill was reported not converged instead of infeasible within the cap")
     runs = binding_report(
         terrain,
         design,
@@ -165,7 +280,17 @@ def check_infeasible_hill() -> None:
     if not any(r["kind"] == "gradient" and r["status"] == "violated" for r in runs):
         fail("hill met the grade limit; the fixture is supposed to show a binding grade")
     depth = float(np.max(np.abs(design - terrain)))
-    print(f"hill: depth {depth:.3f} m, gradient runs reported, cap held")
+    got = run_js("fit", {
+        "terrain": terrain.tolist(),
+        "spacing": ds,
+        "maxGrade": 0.12,
+        "maxCutFillM": 6,
+        "minCrestRadiusM": 1000,
+        "minDipRadiusM": 600,
+    })
+    if got["solve_status"] != status:
+        fail(f"hill JS status {got['solve_status']} != {status}")
+    print(f"hill: depth {depth:.3f} m, {status}, gradient runs reported")
 
 
 def windowed_grade(distances, elevations, lap) -> float:
@@ -216,6 +341,8 @@ def compare_js(profiles: dict, js_layouts: dict) -> None:
             )
         if len(other["bindings"]) != len(profile["bindings"]):
             fail(f"{key}: binding count Python {len(profile['bindings'])} JS {len(other['bindings'])}")
+        if other.get("solve_status") != profile["solve_status"]:
+            fail(f"{key}: solve status Python {profile['solve_status']} JS {other.get('solve_status')}")
         print(
             f"{profile['label']}: Python/JS |dz| {z_err:.1e} m, "
             f"volume Δ {max(cut_err, fill_err):.4f} m³, {len(profile['bindings'])} binding runs"
@@ -254,6 +381,9 @@ def print_table(profiles: dict) -> None:
             f"{fmt_radius(p['terrain']['min_dip_radius_m'])} m | {fmt_radius(p['design']['min_dip_radius_m'])} m | "
             f"{ew['max_cut_m']:.2f} m | {ew['max_fill_m']:.2f} m | {ew['cut_m3']:.0f} | {ew['fill_m3']:.0f} |"
         )
+        open_n = len(ew.get("open_m") or [])
+        if open_n or p["solve_status"] != "converged":
+            print(f"  {label}: solve {p['solve_status']}, {open_n} stations open at 80 m")
     print()
     print(f"Gradient is the {GRADIENT_WINDOW_M:.0f} m window used by the checker. Radii are local osculating radii.")
     print("Python and JS elevations agree within 1e-6 m and volumes within 0.05 m³.")
@@ -320,6 +450,8 @@ def write_chart(profile: dict, path: Path) -> None:
 
 def main() -> int:
     check_bump()
+    check_feasible_wave()
+    check_open_boundary()
     check_infeasible_hill()
     print("fitting layouts...")
     profiles = load_profiles()

@@ -1,5 +1,6 @@
 // Run viewer/vertical_profile.js under Node.
 //   node scripts/js_vertical_profile.mjs fit          (JSON on stdin)
+//   node scripts/js_vertical_profile.mjs section      (JSON on stdin)
 //   node scripts/js_vertical_profile.mjs layouts
 
 import { readFileSync } from 'node:fs';
@@ -9,6 +10,7 @@ import { analyzeLayout, makeDemSampler } from '../viewer/layout_math.js';
 import {
     bindingReport,
     buildVerticalProfile,
+    earthworks,
     fitProfile,
     geometrySummary,
     violationsAreReported,
@@ -48,12 +50,14 @@ function demSampler() {
 
 if (mode === 'fit') {
     const body = JSON.parse(readFileSync(0, 'utf8'));
-    const design = fitProfile(body.terrain, body.spacing, {
+    const solved = fitProfile(body.terrain, body.spacing, {
         maxGrade: body.maxGrade,
         maxCutFillM: body.maxCutFillM,
         minCrestRadiusM: body.minCrestRadiusM,
         minDipRadiusM: body.minDipRadiusM,
+        maxSweeps: body.maxSweeps,
     });
+    const design = solved.z;
     const summary = geometrySummary(design, body.spacing);
     const runs = bindingReport(body.terrain, design, body.spacing, {
         maxGrade: body.maxGrade,
@@ -67,7 +71,26 @@ if (mode === 'fit') {
         minCrestRadiusM: body.minCrestRadiusM ?? 1000,
         minDipRadiusM: body.minDipRadiusM ?? 600,
     });
-    console.log(JSON.stringify({ design, summary, runs, gaps }));
+    console.log(JSON.stringify({ design, summary, runs, gaps, solve_status: solved.solve_status }));
+} else if (mode === 'section') {
+    const body = JSON.parse(readFileSync(0, 'utf8'));
+    // Four stations on a straight so each normal is vertical and the closed
+    // ends stay symmetric under ground = offset + |lateral|.
+    const n = 4;
+    const x = [0, 1, 2, 3];
+    const y = [0, 0, 0, 0];
+    const z = [body.z, body.z, body.z, body.z];
+    const sample = (_px, py) => body.offset + Math.abs(py);
+    const works = earthworks(x, y, z, z, 1, body.width, sample);
+    console.log(JSON.stringify({
+        cut_m3: works.cut_m3,
+        fill_m3: works.fill_m3,
+        per_section_cut: works.cut_m3 / n,
+        left_daylight: works.sections[0].left.daylight,
+        right_daylight: works.sections[0].right.daylight,
+        open: works.sections.every((s) => s.open),
+        open_m: works.open_m,
+    }));
 } else if (mode === 'layouts') {
     const { siteDir, sampleZ } = demSampler();
     const names = [
@@ -102,6 +125,8 @@ if (mode === 'fit') {
             terrain: profile.terrain,
             earthworks: profile.earthworks,
             feasible: profile.feasible,
+            solve_status: profile.solve_status,
+            open_m: profile.earthworks.open_m,
             join_step_m: profile.join_step_m,
             bindings: profile.bindings.map((r) => ({
                 kind: r.kind,
@@ -117,6 +142,6 @@ if (mode === 'fit') {
     }
     console.log(JSON.stringify({ layouts }));
 } else {
-    console.error('usage: js_vertical_profile.mjs fit|layouts');
+    console.error('usage: js_vertical_profile.mjs fit|section|layouts');
     process.exit(2);
 }

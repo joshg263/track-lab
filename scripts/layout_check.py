@@ -587,6 +587,8 @@ def check_layout(layout_path: Path, site_dir: Path = SITE_DIR) -> LayoutReport:
         detail=f"{num_corners} corners"
     ))
     
+    solve_status = profile["solve_status"]
+    solve_note = "" if solve_status == "converged" else f" Solve: {solve_status}."
     gradient_runs = [r for r in bindings if r["kind"] == "gradient"]
     checks.append(CheckResult(
         name="max_gradient",
@@ -596,7 +598,7 @@ def check_layout(layout_path: Path, site_dir: Path = SITE_DIR) -> LayoutReport:
         detail=(
             f"Design {design_gradient:.1f}% (mean {design_mean:.1f}%), "
             f"terrain {max_gradient:.1f}% (mean {mean_gradient:.1f}%). "
-            f"{_binding_brief(gradient_runs)}"
+            f"{_binding_brief(gradient_runs)}{solve_note}"
         ),
     ))
 
@@ -615,7 +617,7 @@ def check_layout(layout_path: Path, site_dir: Path = SITE_DIR) -> LayoutReport:
         detail=(
             f"Design crest {_fmt_radius(design_crest)}, dip {_fmt_radius(design_dip)}; "
             f"terrain crest {_fmt_radius(terrain_crest)}, dip {_fmt_radius(terrain_dip)}. "
-            f"{_binding_brief(curve_runs)}"
+            f"{_binding_brief(curve_runs)}{solve_note}"
         ),
     ))
     
@@ -645,9 +647,10 @@ def check_layout(layout_path: Path, site_dir: Path = SITE_DIR) -> LayoutReport:
     
     depth_violated = any(r["kind"] == "depth" and r["status"] == "violated" for r in bindings)
     depth_runs = [r for r in bindings if r["kind"] == "depth"]
-    daylight_miss = earthworks["daylight_miss_m"]
+    daylight_miss = earthworks.get("open_m", earthworks["daylight_miss_m"])
     daylight_note = (
-        f" {len(daylight_miss)} stations are still open at {MAX_CATCH_M:.0f} m, so those wedges stop there."
+        f" {len(daylight_miss)} stations are flagged open at {MAX_CATCH_M:.0f} m "
+        f"(the 1:2 slope has not met the ground), so those wedges stop there."
         if daylight_miss else ""
     )
     checks.append(CheckResult(
