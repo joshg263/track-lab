@@ -13,10 +13,16 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { analyzeLayout, makeDemSampler } from '../viewer/layout_math.js';
 import {
+    GRAVITY_MPS2,
+    advanceDistance,
     assessDriveProfile,
     buildDriveProfile,
+    driveState,
     formatLapEstimate,
+    lookAheadMetres,
+    sampleProfile,
     stepCriticallyDamped,
+    stepOnboardLook,
 } from '../viewer/drive_profile.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -75,7 +81,7 @@ function runCase(name, layout) {
     if (!report.ok) {
         for (const failure of report.failures) console.log('  FAIL ' + failure);
     }
-    return report.ok;
+    return { ok: report.ok, profile };
 }
 
 const cases = [
@@ -87,8 +93,11 @@ const cases = [
 ];
 
 let ok = true;
+const profiles = {};
 for (const [name, layout] of cases) {
-    if (!runCase(name, layout)) ok = false;
+    const result = runCase(name, layout);
+    profiles[name] = result.profile;
+    if (!result.ok) ok = false;
 }
 
 const nudged = readJson(join(siteDir, 'layouts/layout_a_straight_hairpin.json'));
@@ -118,16 +127,108 @@ if (!unsavedReport.ok) {
     for (const failure of unsavedReport.failures) console.log('  FAIL ' + failure);
 }
 
+const sinUp = 0.355 / Math.hypot(1, 0.355);
+if (driveState(-0.56, sinUp) !== 'throttle') {
+    ok = false;
+    console.log('FAIL uphill net deceleration is still throttle');
+}
+if (driveState(0, -sinUp) !== 'brake') {
+    ok = false;
+    console.log('FAIL holding speed downhill should be brake');
+}
+if (driveState(0, 0) !== 'coast' || driveState(2, 0) !== 'throttle' || driveState(-2, 0) !== 'brake') {
+    ok = false;
+    console.log('FAIL flat-road drive state');
+}
+let uphillThrottle = 0;
+for (const s of profiles['version-2'].samples) {
+    const propulsion = s.longAccel + GRAVITY_MPS2 * s.sinTheta;
+    const expect = propulsion > 0.3 ? 'throttle' : propulsion < -0.3 ? 'brake' : 'coast';
+    if (s.state !== expect) {
+        ok = false;
+        console.log(`FAIL version-2 state ${s.state} at ${s.distance.toFixed(0)} m, want ${expect}`);
+        break;
+    }
+    if (s.gradientPct > 12 && s.longAccel < -0.25 && s.state === 'throttle') uphillThrottle++;
+}
+console.log(`version-2 uphill throttle samples (net slowing, still throttle): ${uphillThrottle}`);
+if (uphillThrottle < 1) {
+    ok = false;
+    console.log('FAIL expected an uphill where gravity slows the car while it stays on throttle');
+}
+
+function wrapAngle(angle) {
+    let d = angle;
+    while (d > Math.PI) d -= Math.PI * 2;
+    while (d < -Math.PI) d += Math.PI * 2;
+    return d;
+}
+
+function headingAt(profile, distance) {
+    const here = sampleProfile(profile, distance);
+    const nose = sampleProfile(profile, distance + 8);
+    return Math.atan2(-(nose.x - here.x), (nose.y - here.y));
+}
+
+function lookTarget(profile, distance) {
+    const here = sampleProfile(profile, distance);
+    const ahead = sampleProfile(profile, distance + lookAheadMetres(here.speedMps, 1.5));
+    const dx = ahead.x - here.x;
+    const dy = ahead.y - here.y;
+    const dz = ahead.z - here.z;
+    return {
+        heading: headingAt(profile, distance),
+        yaw: Math.atan2(-dx, dy),
+        pitch: Math.atan2(dz, Math.hypot(dx, dy) || 1),
+    };
+}
+
+function maxLookLag(profile, playbackMul) {
+    let distance = 0;
+    let state = null;
+    let maxLag = 0;
+    let maxOffHeading = 0;
+    let worstAt = 0;
+    const dt = 1 / 60;
+    const duration = profile.lapTimeS / playbackMul;
+    for (let t = 0; t < duration; t += dt) {
+        const target = lookTarget(profile, distance);
+        state = stepOnboardLook(state, target, dt, playbackMul);
+        const lag = Math.abs(wrapAngle(state.yaw - target.yaw));
+        const offHeading = Math.abs(wrapAngle(state.yaw - target.heading));
+        if (lag > maxLag) {
+            maxLag = lag;
+            worstAt = distance;
+        }
+        if (offHeading > maxOffHeading) maxOffHeading = offHeading;
+        distance = advanceDistance(profile, distance, dt * playbackMul);
+    }
+    return { maxLag, maxOffHeading, worstAt };
+}
+
 const snapped = stepCriticallyDamped(0, 0, Math.PI, 0, 5, 0.55);
 const stepped = stepCriticallyDamped(0, 0, 1.2, 1 / 60, 5, 0.55);
 if (snapped.rate !== 0 || Math.abs(stepped.rate) > 0.55 + 1e-9 || stepped.rate <= 0) {
     ok = false;
     console.log('FAIL critically damped look step', snapped, stepped);
-} else {
+}
+
+for (const [name, mul] of [['version-1', 1], ['version-1', 4]]) {
+    const lag = maxLookLag(profiles[name], mul);
+    const ahead = lag.maxLag * 180 / Math.PI;
+    const nose = lag.maxOffHeading * 180 / Math.PI;
     console.log(
-        `look smoother: snap rate ${snapped.rate}, `
-        + `one frame rate ${stepped.rate.toFixed(3)} rad/s (cap 0.55)`,
+        `${name} onboard look at ${mul}×: ${nose.toFixed(1)}° off the car heading, `
+        + `${ahead.toFixed(1)}° off the look-ahead, worst at ${lag.worstAt.toFixed(0)} m`,
     );
+    if (!(nose < 40)) {
+        ok = false;
+        console.log(`FAIL camera leaves the car heading by ${nose.toFixed(1)}° at ${mul}×`);
+    }
+    if (!(ahead < 90)) {
+        ok = false;
+        console.log(`FAIL camera looks away from the road ahead by ${ahead.toFixed(1)}° at ${mul}×`);
+    }
 }
 
 if (!ok) {

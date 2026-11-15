@@ -216,10 +216,17 @@ function solveSpeed(ds, sinTheta, radius, car) {
     return { v, vLim, aAcc, aBrk, vMax };
 }
 
-function stateFor(longAccel) {
-    if (longAccel > STATE_ACCEL_MPS2) return 'throttle';
-    if (longAccel < -STATE_ACCEL_MPS2) return 'brake';
+function stateFor(propulsion) {
+    if (propulsion > STATE_ACCEL_MPS2) return 'throttle';
+    if (propulsion < -STATE_ACCEL_MPS2) return 'brake';
     return 'coast';
+}
+
+// Throttle and brake are what the car applies. longAccel is the net change
+// along the road, so an uphill can slow the car while it is still on throttle.
+export function driveState(longAccel, sinTheta) {
+    const sinT = Number.isFinite(sinTheta) ? sinTheta : 0;
+    return stateFor(longAccel + GRAVITY_MPS2 * sinT);
 }
 
 export function buildDriveProfile(points, options = {}) {
@@ -293,7 +300,7 @@ export function buildDriveProfile(points, options = {}) {
             sinTheta: sinT,
             gradientPct: cosT > 1e-6 ? (sinT / cosT) * 100 : 0,
             longAccel,
-            state: stateFor(longAccel),
+            state: driveState(longAccel, sinT),
         };
     }
 
@@ -398,6 +405,17 @@ export function formatLapEstimate(seconds) {
     return `${m}:${s.toFixed(1).padStart(4, '0')}`;
 }
 
+export const LOOK_OMEGA = 4.5;
+export const YAW_OFFSET_RATE_MAX = 0.5;
+export const PITCH_RATE_MAX = 0.28;
+
+function wrapAngle(angle) {
+    let d = angle;
+    while (d > Math.PI) d -= Math.PI * 2;
+    while (d < -Math.PI) d += Math.PI * 2;
+    return d;
+}
+
 // Critically damped yaw/pitch. Rate is hard-limited so a corner cannot whip the view.
 export function stepCriticallyDamped(angle, rate, target, dt, omega, maxRate) {
     if (!(dt > 0) || !(omega > 0)) return { angle: target, rate: 0 };
@@ -408,6 +426,50 @@ export function stepCriticallyDamped(angle, rate, target, dt, omega, maxRate) {
     let nextRate = rate + accel * dt;
     if (maxRate > 0) nextRate = clamp(nextRate, -maxRate, maxRate);
     return { angle: angle + nextRate * dt, rate: nextRate };
+}
+
+// Glance relative to the car heading. The heading is applied immediately, so a
+// tight corner cannot leave the camera looking backwards. The rate cap is on
+// the glance only, and it scales with the playback multiplier.
+export function stepOnboardLook(state, target, dt, playbackMul = 1) {
+    const heading = target.heading;
+    const yawOffsetTarget = wrapAngle(target.yaw - heading);
+    const pitchTarget = target.pitch;
+    const pace = clamp(Number.isFinite(playbackMul) ? playbackMul : 1, 0.5, 4);
+    if (!state?.ready || !(dt > 0)) {
+        return {
+            ready: true,
+            yawOffset: yawOffsetTarget,
+            yawOffsetRate: 0,
+            pitch: pitchTarget,
+            pitchRate: 0,
+            yaw: wrapAngle(heading + yawOffsetTarget),
+        };
+    }
+    const yawStep = stepCriticallyDamped(
+        state.yawOffset,
+        state.yawOffsetRate,
+        yawOffsetTarget,
+        dt,
+        LOOK_OMEGA,
+        YAW_OFFSET_RATE_MAX * pace,
+    );
+    const pitchStep = stepCriticallyDamped(
+        state.pitch,
+        state.pitchRate,
+        pitchTarget,
+        dt,
+        LOOK_OMEGA,
+        PITCH_RATE_MAX * pace,
+    );
+    return {
+        ready: true,
+        yawOffset: yawStep.angle,
+        yawOffsetRate: yawStep.rate,
+        pitch: pitchStep.angle,
+        pitchRate: pitchStep.rate,
+        yaw: wrapAngle(heading + yawStep.angle),
+    };
 }
 
 function circularDistance(a, b, lap) {

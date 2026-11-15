@@ -355,7 +355,7 @@
             formatLapEstimate,
             lookAheadMetres,
             sampleProfile,
-            stepCriticallyDamped,
+            stepOnboardLook,
         } from './drive_profile.js';
         import { Terrain, computeViewshed } from './viewshed.js';
 
@@ -403,10 +403,7 @@
         let driveDistance = 0;
         let drivePlaying = false;
         let driveSpeedMul = 1;
-        let lookYaw = 0;
-        let lookPitch = 0;
-        let lookYawRate = 0;
-        let lookPitchRate = 0;
+        let lookState = null;
         let lookReady = false;
         let horizonSteady = false;
         let driveProfile = null;
@@ -425,9 +422,6 @@
         const NOMINAL_SPEED_MPS = 120 / 3.6;
         const ONBOARD_FOV = 70;
         const LOOKAHEAD_S = 1.5;
-        const LOOK_OMEGA = 4.5;
-        const YAW_RATE_MAX = 0.5;
-        const PITCH_RATE_MAX = 0.28;
         const HELI_HEIGHT_M = 78;
         const HELI_BEHIND_M = 58;
         const LOCAL_LOG_KEY = 'tracklab.session-events.v1';
@@ -1920,25 +1914,20 @@
             let pitch = Math.atan2(dirY, Math.hypot(dirX, dirZ) || 1);
             if (horizonSteady) pitch *= 0.2;
             pitch = Math.max(-0.55, Math.min(0.45, pitch));
-            if (!lookReady || !(dt > 0)) {
-                lookYaw = yaw;
-                lookPitch = pitch;
-                lookYawRate = 0;
-                lookPitchRate = 0;
-                lookReady = true;
-            } else {
-                const yawStep = stepCriticallyDamped(lookYaw, lookYawRate, yaw, dt, LOOK_OMEGA, YAW_RATE_MAX);
-                const pitchStep = stepCriticallyDamped(lookPitch, lookPitchRate, pitch, dt, LOOK_OMEGA, PITCH_RATE_MAX);
-                lookYaw = yawStep.angle;
-                lookYawRate = yawStep.rate;
-                lookPitch = pitchStep.angle;
-                lookPitchRate = pitchStep.rate;
-            }
-            lookPitch = Math.max(-0.7, Math.min(0.7, lookPitch));
+            const nose = onboardStation(distance + 8) || ahead;
+            const heading = Math.atan2(-(nose.sceneX - here.sceneX), -(nose.sceneZ - here.sceneZ));
+            lookState = stepOnboardLook(
+                lookReady && dt > 0 ? lookState : { ready: false },
+                { heading, yaw, pitch },
+                dt,
+                driveSpeedMul,
+            );
+            if (dt > 0) lookReady = true;
+            const lookPitch = Math.max(-0.7, Math.min(0.7, lookState.pitch));
             camera.up.set(0, 1, 0);
             camera.position.set(here.sceneX, here.sceneY, here.sceneZ);
             camera.rotation.order = 'YXZ';
-            camera.rotation.set(lookPitch, lookYaw, 0);
+            camera.rotation.set(lookPitch, lookState.yaw, 0);
         }
 
         function applyGrandstand(distance) {
