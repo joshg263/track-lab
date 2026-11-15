@@ -148,7 +148,23 @@
         }
         #camera-modes button, #stand-switch button { flex: 1 1 42%; margin: 0; }
         #drive-readout {
-            font-family: monospace; font-size: 12px; color: #00ffcc; margin-top: 4px;
+            font-family: monospace; font-size: 12px; color: #00ffcc; margin-top: 4px; line-height: 1.45;
+        }
+        #drive-readout .is-throttle { color: #7dffb3; }
+        #drive-readout .is-brake { color: #ff6b6b; }
+        #drive-readout .is-coast { color: #c5cdd6; }
+        #speed-trace {
+            width: 100%; height: 56px; margin-top: 6px; border-radius: 4px;
+            background: #10141c; display: block;
+        }
+        #lap-estimate { font-size: 11px; color: #f9ca24; margin-top: 3px; font-family: monospace; }
+        #car-settings { margin-top: 8px; }
+        #car-settings .car-note { font-size: 10px; color: #999; line-height: 1.35; }
+        #car-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 8px; margin-top: 4px; }
+        #car-grid label { font-size: 11px; margin: 2px 0; }
+        #car-grid input[type="number"] {
+            width: 58px; background: #333; color: #eee; border: 1px solid #555;
+            border-radius: 4px; padding: 3px 4px; font-family: monospace; font-size: 11px;
         }
         #exag-label.disabled { opacity: 0.45; }
 
@@ -225,15 +241,27 @@
                 <button id="btn-drive-play" type="button" class="secondary" disabled>Play</button>
             </div>
             <label>
-                Speed
+                Playback
                 <input id="drive-speed" type="range" min="0.5" max="4" step="0.5" value="1" disabled>
-                <span id="drive-speed-value">1.0× · 120 km/h</span>
+                <span id="drive-speed-value">1.0×</span>
             </label>
             <label>
                 Lap
                 <input id="drive-scrub" type="range" min="0" max="1" step="1" value="0" disabled>
             </label>
+            <label><input type="checkbox" id="horizon-steady"> Horizon steady</label>
             <div id="drive-readout">Load a layout to drive it</div>
+            <canvas id="speed-trace" width="300" height="56"></canvas>
+            <div id="lap-estimate"></div>
+            <div id="car-settings">
+                <div class="car-note">Generic car · not a validated model</div>
+                <div id="car-grid">
+                    <label>Lat <input id="car-alat" type="number" min="0.2" max="3" step="0.1" value="1.5"> g</label>
+                    <label>Brake <input id="car-brake" type="number" min="0.2" max="3" step="0.1" value="1.2"> g</label>
+                    <label>Accel <input id="car-accel" type="number" min="0.05" max="2" step="0.1" value="0.5"> g</label>
+                    <label>Top <input id="car-vmax" type="number" min="40" max="400" step="10" value="250"> km/h</label>
+                </div>
+            </div>
         </div>
 
         <div id="edit-bar">
@@ -280,6 +308,7 @@
             <span id="exag-value">1.5×</span>
         </label>
         <label><input type="checkbox" id="show-layout" checked> Show layout ribbon</label>
+        <label><input type="checkbox" id="show-racing-line" checked> Racing line</label>
         <label><input type="checkbox" id="show-labels" checked> Show corner labels</label>
     </div>
 
@@ -320,6 +349,14 @@
         import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
         import { Sky } from 'three/addons/objects/Sky.js';
         import { analyzeLayout, makeDemSampler } from './layout_math.js';
+        import {
+            advanceDistance,
+            buildDriveProfile,
+            formatLapEstimate,
+            lookAheadMetres,
+            sampleProfile,
+            stepCriticallyDamped,
+        } from './drive_profile.js';
         import { Terrain, computeViewshed } from './viewshed.js';
 
         const params = new URLSearchParams(location.search);
@@ -368,7 +405,11 @@
         let driveSpeedMul = 1;
         let lookYaw = 0;
         let lookPitch = 0;
+        let lookYawRate = 0;
+        let lookPitchRate = 0;
         let lookReady = false;
+        let horizonSteady = false;
+        let driveProfile = null;
         let heliOrbit = 0.55;
         let savedOrbit = null;
         let carMarker = null;
@@ -383,8 +424,10 @@
         const STAND_EYE_M = 1.7;
         const NOMINAL_SPEED_MPS = 120 / 3.6;
         const ONBOARD_FOV = 70;
-        const LOOKAHEAD_M = 42;
-        const LOOK_RATE = 3.2;
+        const LOOKAHEAD_S = 1.5;
+        const LOOK_OMEGA = 4.5;
+        const YAW_RATE_MAX = 0.5;
+        const PITCH_RATE_MAX = 0.28;
         const HELI_HEIGHT_M = 78;
         const HELI_BEHIND_M = 58;
         const LOCAL_LOG_KEY = 'tracklab.session-events.v1';
@@ -662,6 +705,7 @@
             currentLayoutKey = null;
             layoutPoints = null;
             liveMetrics = null;
+            driveProfile = null;
             originalPoints = null;
             workingPoints = null;
             undoStack = [];
@@ -709,7 +753,7 @@
             
             if (!layoutPoints || layoutPoints.length < 2) return;
             
-            const halfWidth = TRACK_WIDTH / 2;
+            const halfWidth = trackWidthM() / 2;
             const outlineWidth = halfWidth + 2;
             const points = layoutPoints;
             const n = points.length;
@@ -780,9 +824,86 @@
             trackGroup.add(trackMesh);
             
             addStartFinishLine();
+            addRacingLine(eye, lift);
             
             trackGroup.visible = document.getElementById('show-layout').checked;
             world.add(trackGroup);
+        }
+
+        function trackWidthM() {
+            const w = Number(currentLayout?.track_width_m);
+            return Number.isFinite(w) && w > 0 ? w : TRACK_WIDTH;
+        }
+
+        function readCarInputs() {
+            const value = (id) => document.getElementById(id)?.value;
+            return {
+                aLatG: value('car-alat'),
+                brakeG: value('car-brake'),
+                accelG: value('car-accel'),
+                topSpeedKmh: value('car-vmax'),
+            };
+        }
+
+        function rebuildDriveProfile() {
+            if (!layoutPoints || !liveMetrics || layoutPoints.length < 8) {
+                driveProfile = null;
+                return;
+            }
+            driveProfile = buildDriveProfile(layoutPoints, {
+                lapLengthM: liveMetrics.lapLengthM,
+                trackWidthM: trackWidthM(),
+                sampleZ,
+                ...readCarInputs(),
+            });
+        }
+
+        function addRacingLine(eye, lift) {
+            if (!driveProfile || !document.getElementById('show-racing-line')?.checked) return;
+            const samples = driveProfile.samples;
+            const n = samples.length;
+            if (n < 2) return;
+            const half = 0.55;
+            const verts = [];
+            for (let i = 0; i < n; i++) {
+                const p = samples[i];
+                const prev = samples[(i - 1 + n) % n];
+                const next = samples[(i + 1) % n];
+                let dx = next.x - prev.x;
+                let dy = next.y - prev.y;
+                const len = Math.hypot(dx, dy) || 1;
+                const nx = -dy / len;
+                const ny = dx / len;
+                const place = (x, y) => {
+                    const z = eye ? meshElevation(x, y) : Math.max(sampleTerrain(x, y), p.z);
+                    return [x, z - baseElevation + lift + 0.28, -y];
+                };
+                verts.push(...place(p.x + nx * half, p.y + ny * half));
+                verts.push(...place(p.x - nx * half, p.y - ny * half));
+            }
+            const indices = [];
+            for (let i = 0; i < n; i++) {
+                const i0 = i * 2;
+                const i1 = i * 2 + 1;
+                const i2 = ((i + 1) % n) * 2;
+                const i3 = ((i + 1) % n) * 2 + 1;
+                indices.push(i0, i2, i1, i1, i2, i3);
+            }
+            const geo = new THREE.BufferGeometry();
+            geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+            geo.setIndex(indices);
+            const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+                color: 0xffcc33,
+                side: THREE.DoubleSide,
+                depthTest: eye,
+                depthWrite: false,
+                transparent: true,
+                opacity: 0.95,
+                fog: eye,
+                toneMapped: false,
+            }));
+            mesh.renderOrder = 13;
+            trackGroup.add(mesh);
         }
 
         function addStartFinishLine() {
@@ -797,7 +918,7 @@
             const surface = eye ? meshElevation(p0.x, p0.y) : p0.z;
             const y = surface - baseElevation + lift + (eye ? 0.15 : 0.5);
             
-            const geometry = new THREE.PlaneGeometry(TRACK_WIDTH + 4, 3);
+            const geometry = new THREE.PlaneGeometry(trackWidthM() + 4, 3);
             const canvas = document.createElement('canvas');
             canvas.width = 64; canvas.height = 16;
             const ctx = canvas.getContext('2d');
@@ -1203,6 +1324,7 @@
             if (!workingPoints || workingPoints.length < 2) return;
             liveMetrics = analyzeLayout(workingPoints, sampleZ);
             layoutPoints = liveMetrics.points;
+            rebuildDriveProfile();
             buildTrackRibbon();
             buildCornerLabels();
             updateLayoutUI();
@@ -1679,8 +1801,18 @@
             return (ahead.z - behind.z) / 24 * 100;
         }
 
-        function onboardStation(distance) {
+        function drivePoint(distance) {
+            if (driveProfile) {
+                const s = sampleProfile(driveProfile, distance);
+                if (s) return s;
+            }
             const p = sampleCentreline(distance);
+            if (!p) return null;
+            return { ...p, speedMps: NOMINAL_SPEED_MPS, state: 'coast', gradientPct: 0 };
+        }
+
+        function onboardStation(distance) {
+            const p = drivePoint(distance);
             if (!p) return null;
             const ground = meshElevation(p.x, p.y);
             const scale = world?.scale.y || 1;
@@ -1703,31 +1835,9 @@
             return hits.length ? hits[0].point.y : null;
         }
 
-        function lookAngles(distance) {
-            const here = onboardStation(distance);
-            const ahead = onboardStation(distance + LOOKAHEAD_M);
-            if (!here || !ahead) return null;
-            const dirX = ahead.sceneX - here.sceneX;
-            const dirY = ahead.sceneY - here.sceneY;
-            const dirZ = ahead.sceneZ - here.sceneZ;
-            return {
-                here,
-                yaw: Math.atan2(-dirX, -dirZ),
-                pitch: Math.atan2(dirY, Math.hypot(dirX, dirZ) || 1),
-            };
-        }
-
-        function dampAngle(current, target, dt) {
-            let delta = target - current;
-            while (delta > Math.PI) delta -= Math.PI * 2;
-            while (delta < -Math.PI) delta += Math.PI * 2;
-            if (dt == null) return target;
-            return current + delta * (1 - Math.exp(-dt * LOOK_RATE));
-        }
-
         function carForward(distance) {
-            const here = sampleCentreline(distance);
-            const ahead = sampleCentreline(distance + 8);
+            const here = drivePoint(distance);
+            const ahead = drivePoint(distance + 8);
             if (!here || !ahead) return { x: 0, z: -1 };
             const fx = ahead.x - here.x;
             const fz = -(ahead.y - here.y);
@@ -1751,7 +1861,7 @@
         function updateCarMarker() {
             ensureCarMarker();
             if (!carMarker) return;
-            const p = layoutPoints && liveMetrics ? sampleCentreline(driveDistance) : null;
+            const p = layoutPoints && liveMetrics ? drivePoint(driveDistance) : null;
             if (!p) {
                 carMarker.visible = false;
                 return;
@@ -1798,19 +1908,35 @@
         }
 
         function applyOnboard(distance, dt) {
-            const look = lookAngles(distance);
-            if (!look) return;
-            if (!lookReady || dt == null) {
-                lookYaw = look.yaw;
-                lookPitch = look.pitch;
+            const here = onboardStation(distance);
+            if (!here) return;
+            const speed = Number.isFinite(here.speedMps) ? here.speedMps : NOMINAL_SPEED_MPS;
+            const ahead = onboardStation(distance + lookAheadMetres(speed, LOOKAHEAD_S));
+            if (!ahead) return;
+            const dirX = ahead.sceneX - here.sceneX;
+            const dirY = ahead.sceneY - here.sceneY;
+            const dirZ = ahead.sceneZ - here.sceneZ;
+            const yaw = Math.atan2(-dirX, -dirZ);
+            let pitch = Math.atan2(dirY, Math.hypot(dirX, dirZ) || 1);
+            if (horizonSteady) pitch *= 0.2;
+            pitch = Math.max(-0.55, Math.min(0.45, pitch));
+            if (!lookReady || !(dt > 0)) {
+                lookYaw = yaw;
+                lookPitch = pitch;
+                lookYawRate = 0;
+                lookPitchRate = 0;
                 lookReady = true;
             } else {
-                lookYaw = dampAngle(lookYaw, look.yaw, dt);
-                lookPitch = dampAngle(lookPitch, look.pitch, dt);
+                const yawStep = stepCriticallyDamped(lookYaw, lookYawRate, yaw, dt, LOOK_OMEGA, YAW_RATE_MAX);
+                const pitchStep = stepCriticallyDamped(lookPitch, lookPitchRate, pitch, dt, LOOK_OMEGA, PITCH_RATE_MAX);
+                lookYaw = yawStep.angle;
+                lookYawRate = yawStep.rate;
+                lookPitch = pitchStep.angle;
+                lookPitchRate = pitchStep.rate;
             }
             lookPitch = Math.max(-0.7, Math.min(0.7, lookPitch));
             camera.up.set(0, 1, 0);
-            camera.position.set(look.here.sceneX, look.here.sceneY, look.here.sceneZ);
+            camera.position.set(here.sceneX, here.sceneY, here.sceneZ);
             camera.rotation.order = 'YXZ';
             camera.rotation.set(lookPitch, lookYaw, 0);
         }
@@ -1919,7 +2045,7 @@
             if (!help) return;
             help.textContent = cameraMode === 'orbit'
                 ? 'Drag to orbit · Onboard, grandstand, or helicopter to judge the lap · Edit points, then drag a handle'
-                : 'Play drives the lap · Scrub to a distance · Orbit returns to the plan view';
+                : 'Play follows the racing line at the profiled speed · Scrub to a distance · Orbit returns to the plan view';
         }
 
         function syncDriveUi() {
@@ -1937,16 +2063,75 @@
             if (document.activeElement !== scrub) scrub.value = String(ready ? Math.round(driveDistance) : 0);
             play.textContent = drivePlaying ? 'Pause' : 'Play';
             const mul = parseFloat(speed.value) || 1;
-            document.getElementById('drive-speed-value').textContent =
-                `${mul.toFixed(1)}× · ${Math.round(120 * mul)} km/h`;
+            document.getElementById('drive-speed-value').textContent = `${mul.toFixed(1)}×`;
+            const lapEl = document.getElementById('lap-estimate');
             if (!ready) {
                 readout.textContent = 'Load a layout to drive it';
+                if (lapEl) lapEl.textContent = '';
+                drawSpeedTrace();
                 return;
             }
-            const grad = localGradientPct(driveDistance);
+            const sample = driveProfile ? sampleProfile(driveProfile, driveDistance) : null;
+            const kmh = sample ? Math.round(sample.speedKmh) : Math.round(120 * mul);
+            const state = sample?.state || 'coast';
+            const grad = sample ? sample.gradientPct : localGradientPct(driveDistance);
             const sign = grad >= 0 ? '+' : '';
-            readout.textContent =
-                `${(driveDistance / 1000).toFixed(3)} / ${(lap / 1000).toFixed(3)} km · gradient ${sign}${grad.toFixed(1)}%`;
+            readout.innerHTML =
+                `<b>${kmh}</b> km/h · <span class="is-${state}">${state}</span><br>`
+                + `${(driveDistance / 1000).toFixed(3)} / ${(lap / 1000).toFixed(3)} km · ${sign}${grad.toFixed(1)}%`;
+            if (lapEl) {
+                lapEl.textContent = driveProfile
+                    ? `Lap estimate ${formatLapEstimate(driveProfile.lapTimeS)}`
+                    : '';
+            }
+            drawSpeedTrace();
+        }
+
+        function drawSpeedTrace() {
+            const canvas = document.getElementById('speed-trace');
+            if (!canvas) return;
+            const cssW = canvas.clientWidth || 300;
+            const cssH = canvas.clientHeight || 56;
+            const dpr = Math.min(window.devicePixelRatio || 1, 2);
+            const pxW = Math.round(cssW * dpr);
+            const pxH = Math.round(cssH * dpr);
+            if (canvas.width !== pxW || canvas.height !== pxH) {
+                canvas.width = pxW;
+                canvas.height = pxH;
+            }
+            const ctx = canvas.getContext('2d');
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            ctx.clearRect(0, 0, cssW, cssH);
+            ctx.fillStyle = '#10141c';
+            ctx.fillRect(0, 0, cssW, cssH);
+            if (!driveProfile?.samples?.length) return;
+            const samples = driveProfile.samples;
+            const lap = driveProfile.lapLengthM || 1;
+            const vmax = Math.max(driveProfile.maxSpeedMps, 1);
+            const xOf = (d) => 4 + (d / lap) * (cssW - 8);
+            const yOf = (v) => cssH - 6 - (v / vmax) * (cssH - 16);
+            const color = {
+                throttle: '#7dffb3',
+                brake: '#ff6b6b',
+                coast: '#8aa0b8',
+            };
+            ctx.lineWidth = 1.6;
+            for (let i = 0; i < samples.length - 1; i++) {
+                const a = samples[i];
+                const b = samples[i + 1];
+                ctx.beginPath();
+                ctx.strokeStyle = color[a.state] || color.coast;
+                ctx.moveTo(xOf(a.distance), yOf(a.speedMps));
+                ctx.lineTo(xOf(b.distance), yOf(b.speedMps));
+                ctx.stroke();
+            }
+            const marker = xOf(driveDistance);
+            ctx.beginPath();
+            ctx.strokeStyle = '#f9ca24';
+            ctx.lineWidth = 1.5;
+            ctx.moveTo(marker, 3);
+            ctx.lineTo(marker, cssH - 3);
+            ctx.stroke();
         }
 
         function setDriveDistance(m, snapLook = true) {
@@ -2203,7 +2388,66 @@
                         localGradientPct: layoutPoints ? localGradientPct(driveDistance) : null,
                         drivePlaying,
                         driveSpeed: driveSpeedMul,
+                        speedKmh: driveProfile ? sampleProfile(driveProfile, driveDistance)?.speedKmh ?? null : null,
+                        driveState: driveProfile ? sampleProfile(driveProfile, driveDistance)?.state ?? null : null,
+                        lapEstimateS: driveProfile?.lapTimeS ?? null,
                     };
+                },
+                profileSummary() {
+                    if (!driveProfile) return null;
+                    const here = sampleProfile(driveProfile, driveDistance);
+                    return {
+                        lapTimeS: driveProfile.lapTimeS,
+                        lapEstimate: formatLapEstimate(driveProfile.lapTimeS),
+                        minSpeedKmh: driveProfile.minSpeedMps * 3.6,
+                        maxSpeedKmh: driveProfile.maxSpeedMps * 3.6,
+                        speedKmh: here?.speedKmh ?? null,
+                        state: here?.state ?? null,
+                        maxAbsOffsetM: driveProfile.maxAbsOffsetM,
+                        edgeLimitM: driveProfile.limitM,
+                        sampleCount: driveProfile.samples.length,
+                    };
+                },
+                previewLayout(layout) {
+                    if (!layout?.control_points || layout.control_points.length < 3 || !currentSite) return false;
+                    const name = layout.name || 'preview';
+                    currentLayoutKey = name;
+                    currentLayout = layout;
+                    ensureLayoutOption(name, `${name} (preview)`);
+                    document.getElementById('layout-select').value = name;
+                    originalPoints = clonePoints(layout.control_points);
+                    workingPoints = clonePoints(originalPoints);
+                    undoStack = [];
+                    selectedIndex = -1;
+                    liveViewshedPct = null;
+                    applyWorkingLayout();
+                    const dir = document.getElementById('layout-direction');
+                    dir.textContent = layout.direction || '';
+                    dir.style.display = layout.direction ? 'block' : 'none';
+                    updateEditButtons();
+                    return true;
+                },
+                frameTrack() {
+                    if (!layoutPoints?.length || !camera || !controls) return;
+                    if (cameraMode !== 'orbit') enterOrbit(false);
+                    let minX = Infinity;
+                    let maxX = -Infinity;
+                    let minY = Infinity;
+                    let maxY = -Infinity;
+                    for (const p of layoutPoints) {
+                        if (p.x < minX) minX = p.x;
+                        if (p.x > maxX) maxX = p.x;
+                        if (p.y < minY) minY = p.y;
+                        if (p.y > maxY) maxY = p.y;
+                    }
+                    const cx = (minX + maxX) / 2;
+                    const cz = -((minY + maxY) / 2);
+                    const size = Math.max(maxX - minX, maxY - minY, 200);
+                    const dist = size * 0.95;
+                    camera.position.set(cx + dist * 0.08, dist * 0.7, cz + dist * 0.38);
+                    controls.target.set(cx, 0, cz);
+                    controls.update();
+                    setShadowArea(new THREE.Vector3(cx, 0, cz), size);
                 },
                 screenPoint,
                 layoutOptions() {
@@ -2312,6 +2556,27 @@
             document.getElementById('show-layout').addEventListener('change', (e) => {
                 if (trackGroup) trackGroup.visible = e.target.checked;
             });
+            document.getElementById('show-racing-line').addEventListener('change', () => {
+                if (layoutPoints) buildTrackRibbon();
+            });
+            document.getElementById('horizon-steady').addEventListener('change', (e) => {
+                horizonSteady = e.target.checked;
+                lookReady = false;
+                if (cameraMode === 'onboard') applyDriveCamera(null);
+            });
+            for (const id of ['car-alat', 'car-brake', 'car-accel', 'car-vmax']) {
+                document.getElementById(id).addEventListener('change', () => {
+                    if (!layoutPoints) return;
+                    rebuildDriveProfile();
+                    buildTrackRibbon();
+                    updateCarMarker();
+                    if (cameraMode !== 'orbit') {
+                        lookReady = false;
+                        applyDriveCamera(null);
+                    }
+                    syncDriveUi();
+                });
+            }
             
             document.getElementById('show-labels').addEventListener('change', () => {
                 if (document.getElementById('show-labels').checked) buildCornerLabels();
@@ -2363,8 +2628,12 @@
             lastFrameMs = now;
             if (drivePlaying && liveMetrics?.lapLengthM) {
                 const lap = liveMetrics.lapLengthM;
-                driveDistance = (driveDistance + NOMINAL_SPEED_MPS * driveSpeedMul * dt) % lap;
-                if (driveDistance < 0) driveDistance += lap;
+                if (driveProfile) {
+                    driveDistance = advanceDistance(driveProfile, driveDistance, dt * driveSpeedMul);
+                } else {
+                    driveDistance = (driveDistance + NOMINAL_SPEED_MPS * driveSpeedMul * dt) % lap;
+                    if (driveDistance < 0) driveDistance += lap;
+                }
             }
             updateCarMarker();
             if (cameraMode === 'orbit') controls.update();
