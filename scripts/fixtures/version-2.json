@@ -1,0 +1,131 @@
+{
+  "name": "version-2",
+  "direction": "A long straight across the basin floor into a hairpin under the north rim",
+  "version": 1,
+  "track_width_m": 14.0,
+  "coordinate_system": "local_m",
+  "control_points": [
+    {
+      "x": 704.93,
+      "y": -390.2,
+      "note": "S/F - south flat"
+    },
+    {
+      "x": 1023.64,
+      "y": -576.15,
+      "note": "Main straight north"
+    },
+    {
+      "x": 961.49,
+      "y": -391.43
+    },
+    {
+      "x": 1033.93,
+      "y": -324.92,
+      "note": "Straight continues"
+    },
+    {
+      "x": 1022.13,
+      "y": -220.96,
+      "note": "Hairpin approach"
+    },
+    {
+      "x": 1121.54,
+      "y": -164.14,
+      "note": "Hairpin entry"
+    },
+    {
+      "x": 1325.74,
+      "y": 29.1,
+      "note": "Hairpin apex - far north"
+    },
+    {
+      "x": 1425.42,
+      "y": -75.88,
+      "note": "Hairpin exit - north flat"
+    },
+    {
+      "x": 1187.62,
+      "y": -161.72
+    },
+    {
+      "x": 1326.75,
+      "y": -248.36
+    },
+    {
+      "x": 1220.13,
+      "y": -442.04,
+      "note": "Turn 2 - still north flat"
+    },
+    {
+      "x": 1289.08,
+      "y": -584.82
+    },
+    {
+      "x": 1313.77,
+      "y": -695.07,
+      "note": "South transition - long jump"
+    },
+    {
+      "x": 1244.76,
+      "y": -750.47
+    },
+    {
+      "x": 1143.02,
+      "y": -719.78
+    },
+    {
+      "x": 1079.58,
+      "y": -641.11
+    },
+    {
+      "x": 919.04,
+      "y": -598.25
+    },
+    {
+      "x": 806.67,
+      "y": -623.39
+    },
+    {
+      "x": 711.75,
+      "y": -530.43
+    },
+    {
+      "x": 635.83,
+      "y": -579.59
+    },
+    {
+      "x": 556.6,
+      "y": -551.5
+    },
+    {
+      "x": 299.65,
+      "y": -566.4
+    },
+    {
+      "x": 331.37,
+      "y": -468.69,
+      "note": "Turn 3 - south flat"
+    },
+    {
+      "x": 219.65,
+      "y": -413.33,
+      "note": "South section"
+    },
+    {
+      "x": 178.06,
+      "y": -361.83,
+      "note": "Return west"
+    },
+    {
+      "x": 386.06,
+      "y": -330.03
+    },
+    {
+      "x": 457.81,
+      "y": -414.31
+    }
+  ],
+  "notes": "First pass at a dragged layout",
+  "edited_from": "version-1"
+}

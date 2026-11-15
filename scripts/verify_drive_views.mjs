@@ -7,7 +7,7 @@
 // terrain for the whole lap, and the scrub slider moves the camera. Also
 // checks the layout dropdown lists version-1 on a fresh load.
 
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -112,6 +112,18 @@ await page.click('#btn-cam-onboard');
 await page.waitForFunction(() => window.__tracklab.getStats().cameraMode === 'onboard');
 const reportA = await page.evaluate(() => window.__tracklab.probeOnboardClearance(5));
 assertClearance('layout A', reportA);
+const summaryA = await page.evaluate(() => window.__tracklab.profileSummary());
+console.log('layout A profile', JSON.stringify(summaryA));
+if (!summaryA || !(summaryA.maxSpeedKmh - summaryA.minSpeedKmh > 20)) {
+    throw new Error('layout A speed profile is missing or flat');
+}
+const readoutA = await page.$eval('#drive-readout', (el) => el.innerText);
+if (!/km\/h/.test(readoutA) || !/throttle|brake|coast/.test(readoutA)) {
+    throw new Error('speed readout missing km/h or throttle/brake/coast: ' + readoutA);
+}
+const estimateA = await page.$eval('#lap-estimate', (el) => el.textContent);
+if (!/estimate/i.test(estimateA)) throw new Error('lap time is not labelled estimate: ' + estimateA);
+console.log('readout', readoutA.replace(/\n/g, ' | '), '|', estimateA);
 
 const moved = await page.evaluate(() => {
     window.__tracklab.setDriveDistance(0, true);
@@ -137,6 +149,23 @@ if (Math.abs(moved.distanceM - moved.target) > 2) {
 }
 if (!(moved.clearance >= 1.0)) throw new Error('camera under the scrubbed view is below the terrain');
 
+await page.evaluate((d) => window.__tracklab.setDriveDistance(d, true), Math.round(reportA.lapLengthM * 0.22));
+await page.evaluate(() => document.getElementById('speed-trace').scrollIntoView({ block: 'center' }));
+await page.waitForTimeout(350);
+await page.screenshot({ path: join(root, 'docs/onboard_speed.png') });
+
+await page.fill('#car-vmax', '180');
+await page.dispatchEvent('#car-vmax', 'change');
+const capped = await page.evaluate(() => window.__tracklab.profileSummary());
+console.log('capped top', capped.maxSpeedKmh.toFixed(1));
+if (!(capped.maxSpeedKmh <= 180.5)) throw new Error('top speed setting did not cap the profile');
+await page.fill('#car-vmax', '250');
+await page.dispatchEvent('#car-vmax', 'change');
+await page.click('#show-racing-line');
+await page.click('#show-racing-line');
+await page.click('#horizon-steady');
+await page.click('#horizon-steady');
+
 await page.selectOption('#layout-select', 'version-1');
 await page.waitForFunction(() => window.__tracklab.getStats().layoutId === 'version-1', null, { timeout: 15000 });
 await page.click('#btn-cam-onboard');
@@ -144,10 +173,21 @@ await page.waitForFunction(() => window.__tracklab.getStats().cameraMode === 'on
 const reportV = await page.evaluate(() => window.__tracklab.probeOnboardClearance(5));
 assertClearance('version-1', reportV);
 
+const summaryV = await page.evaluate(() => window.__tracklab.profileSummary());
+console.log('version-1 profile', JSON.stringify(summaryV));
+if (!summaryV || !(summaryV.maxSpeedKmh - summaryV.minSpeedKmh > 20)) {
+    throw new Error('version-1 speed profile is missing or flat');
+}
+
 const crestV = (reportV.crestDistanceM - 70 + reportV.lapLengthM) % reportV.lapLengthM;
 await page.evaluate((d) => window.__tracklab.setDriveDistance(d, true), crestV);
+await page.evaluate(() => document.getElementById('speed-trace').scrollIntoView({ block: 'center' }));
 await page.waitForTimeout(500);
 await page.screenshot({ path: join(root, 'docs/onboard_crest.png') });
+await page.evaluate((d) => window.__tracklab.setDriveDistance(d, true), Math.round(reportV.lapLengthM * 0.45));
+await page.evaluate(() => document.getElementById('speed-trace').scrollIntoView({ block: 'center' }));
+await page.waitForTimeout(300);
+await page.screenshot({ path: join(root, 'docs/speed_trace_version1.png') });
 
 const movedV = await page.evaluate(() => {
     const lap = window.__tracklab.getStats().lapLengthM;
@@ -199,6 +239,40 @@ await page.evaluate(() => {
 });
 await page.waitForTimeout(200);
 await page.screenshot({ path: join(root, 'docs/layout_dropdown_version1.png') });
+await page.evaluate(() => {
+    document.getElementById('layout-select').removeAttribute('size');
+});
+
+const version2 = JSON.parse(readFileSync(join(root, 'scripts/fixtures/version-2.json'), 'utf8'));
+const previewed = await page.evaluate((layout) => window.__tracklab.previewLayout(layout), version2);
+if (!previewed) throw new Error('version-2 preview failed');
+await page.waitForFunction(() => window.__tracklab.getStats().layoutId === 'version-2', null, { timeout: 15000 });
+const summary2 = await page.evaluate(() => window.__tracklab.profileSummary());
+console.log('version-2 profile', JSON.stringify(summary2));
+if (!summary2 || !(summary2.maxSpeedKmh > summary2.minSpeedKmh + 20)) {
+    throw new Error('version-2 speed profile is missing or flat');
+}
+await page.click('#btn-cam-orbit');
+await page.waitForFunction(() => window.__tracklab.getStats().cameraMode === 'orbit');
+await page.evaluate(() => {
+    const box = document.getElementById('show-racing-line');
+    if (!box.checked) {
+        box.checked = true;
+        box.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    window.__tracklab.frameTrack();
+});
+await page.waitForTimeout(500);
+await page.screenshot({ path: join(root, 'docs/version2_racing_line.png') });
+
+await page.click('#btn-cam-onboard');
+await page.waitForFunction(() => window.__tracklab.getStats().cameraMode === 'onboard');
+const report2 = await page.evaluate(() => window.__tracklab.probeOnboardClearance(5));
+assertClearance('version-2', report2);
+await page.evaluate((d) => window.__tracklab.setDriveDistance(d, true), Math.round(report2.lapLengthM * 0.28));
+await page.evaluate(() => document.getElementById('speed-trace').scrollIntoView({ block: 'center' }));
+await page.waitForTimeout(450);
+await page.screenshot({ path: join(root, 'docs/version2_onboard.png') });
 
 if (missed.length) console.log('http misses:\n' + missed.join('\n'));
 if (errors.length) {
