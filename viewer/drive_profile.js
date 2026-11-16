@@ -24,7 +24,8 @@ const LINE_CORNER_RADIUS_M = 170;
 const LINE_LONG_STRAIGHT_M = 180;
 const LINE_LATE_APEX_BOOST = 10;
 const LINE_MIN_LATE_TURN_RAD = 20 * Math.PI / 180;
-const LINE_OFFSET_SMOOTH = 5;
+const LINE_SLOPE = 2e-3;
+const LINE_OFFSET_SMOOTH = 3;
 const RADIUS_HALF_WINDOW_M = 10;
 const CURVATURE_SMOOTH_SAMPLES = 3;
 const SPEED_ITERS = 32;
@@ -308,39 +309,32 @@ function zeroBandEntry(band, i, j) {
 }
 
 // Bound-constrained convex QP, min 0.5 n·H·n + g·n, |n| <= limit.
-// H is cyclic pentadiagonal. Points stay on a bound only while the gradient
-// still pushes them outward, so a corner can use the apex without pinning
-// the whole straight.
+// H is cyclic pentadiagonal. The working set is the stations held on a
+// bound. A full step that stays inside is optimal on that face, and a
+// station is released only when its gradient points back inside: nonpositive
+// on the upper bound, nonnegative on the lower. A step that would leave the
+// track stops on the bound and adds that station.
 function solveBoundedOffsets(band, g, limit) {
     const n = g.length;
     const fixed = new Int8Array(n);
-    const boundValue = new Float64Array(n);
     const first = solveCyclic(band, Float64Array.from(g, (v) => -v));
     const x = first ? first.slice() : new Float64Array(n);
-    for (let i = 0; i < n; i++) x[i] = clamp(x[i], -limit, limit);
-    for (let iter = 0; iter < 12; iter++) {
-        const grad = applyFull(band, x);
-        for (let i = 0; i < n; i++) grad[i] += g[i];
-        for (let i = 0; i < n; i++) {
-            const atHi = x[i] >= limit - 1e-6;
-            const atLo = x[i] <= -limit + 1e-6;
-            if (atHi && !atLo && grad[i] >= -1e-7) {
-                fixed[i] = 1;
-                boundValue[i] = limit;
-                x[i] = limit;
-            } else if (atLo && !atHi && grad[i] <= 1e-7) {
-                fixed[i] = -1;
-                boundValue[i] = -limit;
-                x[i] = -limit;
-            } else {
-                fixed[i] = 0;
-            }
+    for (let i = 0; i < n; i++) {
+        if (x[i] >= limit) {
+            x[i] = limit;
+            fixed[i] = 1;
+        } else if (x[i] <= -limit) {
+            x[i] = -limit;
+            fixed[i] = -1;
         }
+    }
+
+    const faceTarget = () => {
         const reduced = copyBand(band);
         const rhs = Float64Array.from(g, (v) => -v);
         for (let i = 0; i < n; i++) {
             if (fixed[i] === 0) continue;
-            const v = boundValue[i];
+            const v = fixed[i] > 0 ? limit : -limit;
             for (const j of coupledIndices(n, i)) {
                 const hij = bandEntry(reduced, i, j);
                 if (hij !== 0) rhs[j] -= hij * v;
@@ -349,21 +343,85 @@ function solveBoundedOffsets(band, g, limit) {
             reduced.d0[i] = 1;
             rhs[i] = v;
         }
-        const solved = solveCyclic(reduced, rhs);
-        if (!solved) break;
-        let viol = 0;
-        let moved = 0;
+        return solveCyclic(reduced, rhs);
+    };
+
+    for (let iter = 0; iter < n + 8; iter++) {
+        const target = faceTarget();
+        if (!target) break;
+        const dir = new Float64Array(n);
+        const hitAt = new Float64Array(n);
+        hitAt.fill(Infinity);
+        let alpha = 1;
         for (let i = 0; i < n; i++) {
-            let v = fixed[i] !== 0 ? boundValue[i] : solved[i];
-            if (v > limit) { v = limit; viol++; }
-            else if (v < -limit) { v = -limit; viol++; }
-            moved = Math.max(moved, Math.abs(v - x[i]));
-            x[i] = v;
+            if (fixed[i] !== 0) continue;
+            const p = target[i] - x[i];
+            dir[i] = p;
+            if (Math.abs(p) < 1e-12) continue;
+            let room = Infinity;
+            if (p > 0) room = (limit - x[i]) / p;
+            else room = (-limit - x[i]) / p;
+            if (room < 1 - 1e-12) {
+                if (room < 0) room = 0;
+                hitAt[i] = room;
+                if (room < alpha) alpha = room;
+            }
         }
-        if (viol === 0 && moved < 1e-3) break;
+        for (let i = 0; i < n; i++) {
+            if (fixed[i] > 0) x[i] = limit;
+            else if (fixed[i] < 0) x[i] = -limit;
+            else x[i] = clamp(x[i] + alpha * dir[i], -limit, limit);
+        }
+        if (alpha < 1 - 1e-10) {
+            for (let i = 0; i < n; i++) {
+                if (fixed[i] !== 0 || !(hitAt[i] <= alpha + 1e-8)) continue;
+                fixed[i] = dir[i] > 0 ? 1 : -1;
+                x[i] = fixed[i] > 0 ? limit : -limit;
+            }
+            continue;
+        }
+        const grad = applyFull(band, x);
+        for (let i = 0; i < n; i++) grad[i] += g[i];
+        let scale = 0;
+        for (let i = 0; i < n; i++) scale = Math.max(scale, Math.abs(grad[i]), Math.abs(g[i]));
+        const tol = 1e-7 * Math.max(scale, 1);
+        let drop = -1;
+        let dropInward = tol;
+        for (let i = 0; i < n; i++) {
+            if (fixed[i] === 0) continue;
+            const inward = fixed[i] > 0 ? grad[i] : -grad[i];
+            if (inward > dropInward) {
+                dropInward = inward;
+                drop = i;
+            }
+        }
+        if (drop < 0) break;
+        fixed[drop] = 0;
     }
     for (let i = 0; i < n; i++) x[i] = clamp(x[i], -limit, limit);
     return x;
+}
+
+// Largest KKT violation of |x| <= limit, divided by the largest |linear
+// term|. Zero when every free station is stationary and every bound station
+// has its gradient pointing outward. The scale is the curvature forcing, so
+// a clipped station whose objective still falls by moving inward does not
+// hide behind a large outward multiplier somewhere else.
+function boundGradientViolation(band, g, x, limit) {
+    const grad = applyFull(band, x);
+    let scale = 0;
+    for (let i = 0; i < g.length; i++) scale = Math.max(scale, Math.abs(g[i]));
+    let violation = 0;
+    for (let i = 0; i < x.length; i++) {
+        const gi = grad[i] + g[i];
+        const atHi = x[i] >= limit - 1e-4;
+        const atLo = x[i] <= -limit + 1e-4;
+        let inward = Math.abs(gi);
+        if (atHi && !atLo) inward = Math.max(0, gi);
+        else if (atLo && !atHi) inward = Math.max(0, -gi);
+        if (inward > violation) violation = inward;
+    }
+    return violation / Math.max(scale, 1e-12);
 }
 
 function lateApexWeights(kappa, ds) {
@@ -409,6 +467,11 @@ function lateApexWeights(kappa, ds) {
     return weight;
 }
 
+// Minimise (centreline curvature + offset second derivative)^2, plus a small
+// penalty on the offset's slope. The curvature term puts a real corner
+// outside, then apex, then outside. The slope term keeps that apex from
+// being one sideways step. Literal summed squared curvature of the polyline
+// is not the objective: on a hairpin it sits on the outside and never apexes.
 function stationOffsets(kappaRaw, ds, limit) {
     const kappa = circularSmooth(kappaRaw, 1);
     const n = kappa.length;
@@ -416,6 +479,7 @@ function stationOffsets(kappaRaw, ds, limit) {
     const a = 1 / (ds * ds);
     const band = emptyBand(n);
     const g = new Float64Array(n);
+    const slope = LINE_SLOPE / ds;
     for (let s = 0; s < n; s++) {
         const im = (s - 1 + n) % n;
         const ip = (s + 1) % n;
@@ -428,9 +492,13 @@ function stationOffsets(kappaRaw, ds, limit) {
             }
             g[idx[p]] += 2 * w * coef[p] * kappa[s];
         }
+        addEntry(band, s, s, 2 * slope);
+        addEntry(band, ip, ip, 2 * slope);
+        addEntry(band, s, ip, -2 * slope);
     }
     for (let s = 0; s < n; s++) band.d0[s] += 2 * ds * LINE_RIDGE;
-    return solveBoundedOffsets(band, g, limit);
+    const solved = solveBoundedOffsets(band, g, limit);
+    return { solved, violation: boundGradientViolation(band, g, solved, limit) };
 }
 
 function valueAtDistance(distance, values, target, lap) {
@@ -464,10 +532,19 @@ function minimumCurvatureOffsets(frame, limitM) {
     for (let s = 0; s < nSta; s++) {
         stationKappa[s] = valueAtDistance(distance, kappaFine, s * ds, lap);
     }
-    const solved = stationOffsets(stationKappa, ds, limitM);
-    // A short moving average keeps the corner entry from kinking. The curvature
-    // term on its own can cancel a bend with one sharp offset change.
-    const stationN = circularSmooth(solved, LINE_OFFSET_SMOOTH).map((v) => clamp(v, -limitM, limitM));
+    const station = stationOffsets(stationKappa, ds, limitM);
+    const solved = station.solved;
+    // Smooth the turn-in. A hairpin apex is only a couple of stations wide,
+    // so put half of that peak back — otherwise the average misses the inside.
+    const blurred = circularSmooth(solved, LINE_OFFSET_SMOOTH);
+    const stationN = blurred.map((v, i) => {
+        const prev = solved[(i - 1 + solved.length) % solved.length];
+        const next = solved[(i + 1) % solved.length];
+        const peak = Math.abs(solved[i]) >= Math.abs(prev) && Math.abs(solved[i]) >= Math.abs(next)
+            && Math.abs(solved[i]) > 0.75 * limitM;
+        const mixed = peak ? 0.7 * v + 0.3 * solved[i] : v;
+        return clamp(mixed, -limitM, limitM);
+    });
     const offsets = new Array(n);
     for (let i = 0; i < n; i++) {
         let u = distance[i] / ds;
@@ -478,7 +555,7 @@ function minimumCurvatureOffsets(frame, limitM) {
         const blend = t * t * (3 - 2 * t);
         offsets[i] = clamp(stationN[s0] * (1 - blend) + stationN[s1] * blend, -limitM, limitM);
     }
-    return offsets;
+    return { offsets, boundViolation: station.violation };
 }
 
 function mengerRadius(x1, y1, x2, y2, x3, y3) {
@@ -578,7 +655,8 @@ export function buildDriveProfile(points, options = {}) {
     const limitM = Math.max(0.4, car.trackWidthM / 2 - car.marginM);
     const frame = centrelineFrame(points, options.lapLengthM || 0);
     const { n, cx, cy, distance, nx, ny, lap } = frame;
-    const offsets = minimumCurvatureOffsets(frame, limitM);
+    const line = minimumCurvatureOffsets(frame, limitM);
+    const offsets = line.offsets;
     const x = new Array(n);
     const y = new Array(n);
     const z = new Array(n);
@@ -656,6 +734,7 @@ export function buildDriveProfile(points, options = {}) {
         minSpeedMps: minSpeed,
         maxSpeedMps: maxSpeed,
         maxAbsOffsetM: maxAbsOffset,
+        boundViolation: line.boundViolation,
         accelMps2: solved.aAcc,
         brakeMps2: solved.aBrk,
         samples,

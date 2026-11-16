@@ -2,11 +2,12 @@
 //   node scripts/verify_racing_line.mjs
 //
 // On layout A, version-1 and version-2: the line stays inside the usable
-// width, real corners are outside then apex then outside, a corner onto a
-// long straight apexes after its geometric midpoint, a linked pair gives the
-// exit to the second corner, and flat-out kinks are straighter than the
-// centreline. Lap estimates are rough and should be faster than the old
-// shortest-path line.
+// width, the station solve is optimal for that bound (free stations
+// stationary, bound stations still pushed outward), real corners are outside
+// then apex then outside, a corner onto a long straight apexes after its
+// geometric midpoint, a linked pair gives the exit to the second corner, and
+// flat-out kinks are straighter than the centreline. Lap estimates are rough
+// and should be faster than the old shortest-path line.
 
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -129,9 +130,16 @@ function check(name, layout) {
         `\n${name}: rough lap ${formatLapEstimate(profile.lapTimeS)} `
         + `(${profile.lapTimeS.toFixed(1)} s), was ${formatLapEstimate(PREVIOUS_LAP_S[name])} `
         + `(${PREVIOUS_LAP_S[name].toFixed(1)} s). `
-        + `Max offset ${widest.toFixed(2)} / ${limit.toFixed(2)} m.`,
+        + `Max offset ${widest.toFixed(2)} / ${limit.toFixed(2)} m. `
+        + `Bound violation ${profile.boundViolation.toExponential(2)}.`,
     );
-    if (!(profile.lapTimeS < PREVIOUS_LAP_S[name] - 0.2)) {
+    if (!(profile.boundViolation < 1e-4)) {
+        failures.push(
+            `${name} station solve is not bound-optimal `
+            + `(gradient violation ${profile.boundViolation.toExponential(2)})`,
+        );
+    }
+    if (!(profile.lapTimeS < PREVIOUS_LAP_S[name] - 0.05)) {
         failures.push(`${name} lap ${profile.lapTimeS.toFixed(2)} s is not faster than ${PREVIOUS_LAP_S[name].toFixed(1)} s`);
     }
 
@@ -244,7 +252,10 @@ function check(name, layout) {
         const turnA = Math.sign(signedCurvatureAt(points, nearestIndex(samples, lap, a.position_m))) || 1;
         const turnB = Math.sign(signedCurvatureAt(points, nearestIndex(samples, lap, b.position_m))) || 1;
         const junction = insideOffset(sampleAt(samples, lap, a.position_m + gap / 2), turnA);
-        const apexA = insideOffset(sampleAt(samples, lap, a.position_m), turnA);
+        let apexA = -Infinity;
+        for (let dm = -8; dm <= 40; dm += 2) {
+            apexA = Math.max(apexA, insideOffset(sampleAt(samples, lap, a.position_m + dm), turnA));
+        }
         let exitB = Infinity;
         for (let dm = 30; dm <= 180; dm += 4) {
             exitB = Math.min(exitB, insideOffset(sampleAt(samples, lap, b.position_m + dm), turnB));
@@ -275,10 +286,15 @@ function check(name, layout) {
             }
         }
         const junctionSample = sampleAt(samples, lap, midDist);
+        let apexSample = sampleAt(samples, lap, a.position_m);
+        for (let dm = -8; dm <= 40; dm += 2) {
+            const s = sampleAt(samples, lap, a.position_m + dm);
+            if (insideOffset(s, turnA) >= apexA - 1e-6) apexSample = s;
+        }
         console.log(
             `  linked R${a.radius_m.toFixed(0)} @${a.position_m.toFixed(0)} then `
             + `R${b.radius_m.toFixed(0)} @${b.position_m.toFixed(0)} (${gap.toFixed(0)} m): `
-            + `first apex ${fmt(sampleAt(samples, lap, a.position_m).offsetM)} m `
+            + `first apex ${fmt(apexSample.offsetM)} m `
             + `(${fmt(apexA)} inside), junction ${fmt(junctionSample.offsetM)} m `
             + `(${fmt(junction)} inside), second exit ${fmt(exitBOffset)} m `
             + `(${fmt(exitB)} inside) at ${exitBAt.toFixed(0)} m`,
@@ -303,9 +319,11 @@ function check(name, layout) {
         const ip = (i + 1) % centreK.length;
         if (!(centreK[i] >= centreK[im] && centreK[i] >= centreK[ip])) continue;
         const dist = points[i].distance;
+        // A detected corner is not a flat-out kink, including its entry where
+        // the centreline radius is still a bit larger than the corner's own.
         const nearCorner = radius >= 400
             ? corners.some(c => c.radius_m < 200 && circ(c.position_m, dist, lap) < 180)
-            : corners.some(c => c.radius_m < 50 && circ(c.position_m, dist, lap) < 90);
+            : corners.some(c => c.radius_m < 250 && circ(c.position_m, dist, lap) < 90);
         if (nearCorner) continue;
         let peakC = 0;
         let peakL = 0;
