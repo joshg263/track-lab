@@ -65,6 +65,7 @@ const browser = await chromium.launch({
 });
 
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+page.setDefaultTimeout(180000);
 const errors = [];
 const missed = [];
 page.on('pageerror', (err) => errors.push(String(err)));
@@ -82,6 +83,50 @@ async function openLayout(layout) {
     await page.goto(url, { waitUntil: 'networkidle' });
     await page.waitForFunction(() => window.__ready && window.__tracklab?.getStats()?.lapLengthM, null, { timeout: 30000 });
     await page.waitForTimeout(400);
+}
+
+function assertRenderedSurface(name, report) {
+    const line = (label, view) => (
+        `${label} min ${view?.minClearanceM} m at ${view?.minAtM} m, `
+        + `samples ${view?.samples}, violations ${view?.violations}, misses ${view?.misses}`
+    );
+    console.log(`${name} rendered terrain`);
+    console.log('  ' + line('onboard', report?.onboard));
+    console.log('  ' + line('chase', report?.chase));
+    console.log('  ' + line('helicopter', report?.helicopter));
+    console.log('  stands', JSON.stringify(report?.stands));
+    console.log('  road', JSON.stringify(report?.road));
+    console.log('  volumes', JSON.stringify(report?.volumes));
+    if (!report) throw new Error(name + ' rendered clearance probe returned nothing');
+    for (const label of ['onboard', 'chase', 'helicopter']) {
+        const view = report[label];
+        if (!(view?.samples > 100)) throw new Error(`${name} ${label} took too few terrain samples`);
+        if (view.violations || view.misses) {
+            throw new Error(
+                `${name} ${label} clips the rendered terrain `
+                + `(min ${view.minClearanceM} m, violations ${view.violations}, misses ${view.misses}) `
+                + JSON.stringify(view.examples),
+            );
+        }
+        if (!(view.minClearanceM >= report.marginM)) {
+            throw new Error(`${name} ${label} clearance ${view.minClearanceM} m is under ${report.marginM} m`);
+        }
+    }
+    for (const stand of report.stands || []) {
+        if (!stand.insideTerrain) continue;
+        if (!(stand.clearanceM >= report.marginM)) {
+            throw new Error(`${name} ${stand.name} is ${stand.clearanceM} m above the rendered terrain`);
+        }
+    }
+    const road = report.road;
+    if (!(road?.samples > 100)) throw new Error(name + ' corridor sample was too small');
+    if (road.violations || road.misses) {
+        throw new Error(
+            `${name} road is below the rendered terrain `
+            + `(worst bury ${road.worstBuryM} m at ${road.worstAtM} m) `
+            + JSON.stringify(road.examples),
+        );
+    }
 }
 
 function assertClearance(name, report) {
@@ -117,6 +162,8 @@ console.log('layout A marker vs design', JSON.stringify(markerA));
 if (!markerA || !(markerA.samples > 100) || !(markerA.maxAbsM <= 0.1)) {
     throw new Error(`layout A marker is ${markerA?.maxAbsM} m off design z at ${markerA?.atM} m`);
 }
+const earthA = await page.evaluate(() => window.__tracklab.probeRenderedClearance(8));
+assertRenderedSurface('layout A', earthA);
 const summaryA = await page.evaluate(() => window.__tracklab.profileSummary());
 console.log('layout A profile', JSON.stringify(summaryA));
 if (!summaryA || !(summaryA.maxSpeedKmh - summaryA.minSpeedKmh > 20)) {
@@ -180,6 +227,8 @@ await page.click('#btn-cam-onboard');
 await page.waitForFunction(() => window.__tracklab.getStats().cameraMode === 'onboard');
 const reportV = await page.evaluate(() => window.__tracklab.probeOnboardClearance(5));
 assertClearance('version-1', reportV);
+const earthV = await page.evaluate(() => window.__tracklab.probeRenderedClearance(8));
+assertRenderedSurface('version-1', earthV);
 
 const summaryV = await page.evaluate(() => window.__tracklab.profileSummary());
 console.log('version-1 profile', JSON.stringify(summaryV));
@@ -283,6 +332,8 @@ console.log('version-2 marker vs design', JSON.stringify(marker2));
 if (!marker2 || !(marker2.samples > 100) || !(marker2.maxAbsM <= 0.1)) {
     throw new Error(`version-2 marker is ${marker2?.maxAbsM} m off design z at ${marker2?.atM} m`);
 }
+const earth2 = await page.evaluate(() => window.__tracklab.probeRenderedClearance(8));
+assertRenderedSurface('version-2', earth2);
 await page.evaluate((d) => window.__tracklab.setDriveDistance(d, true), Math.round(report2.lapLengthM * 0.28));
 await page.evaluate(() => document.getElementById('speed-trace').scrollIntoView({ block: 'center' }));
 await page.waitForTimeout(450);
