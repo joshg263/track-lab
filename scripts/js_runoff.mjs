@@ -8,7 +8,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeDemSampler } from '../viewer/layout_math.js';
 import { buildDriveProfile } from '../viewer/drive_profile.js';
-import { assessRunoff } from '../viewer/runoff.js';
+import { buildVerticalProfile } from '../viewer/vertical_profile.js';
+import { assessRunoff, carvedGround } from '../viewer/runoff.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const mode = process.argv[2];
@@ -216,7 +217,27 @@ if (mode === 'assess') {
     for (const [name] of names) {
         const spec = body[name];
         const trace = speedTrace(spec.x, spec.y, spec.designZ, spec.distances, spec.lapM, spec.trackWidthM);
-        const report = runAssess({ ...spec, speedTrace: trace, ground: { kind: 'dem' } }, sampleZ);
+        const terrainZ = spec.x.map((x, i) => sampleZ(x, spec.y[i]));
+        const profile = buildVerticalProfile(
+            spec.x,
+            spec.y,
+            spec.distances,
+            terrainZ,
+            spec.lapM,
+            spec.trackWidthM || 14,
+            sampleZ,
+            { maxGrade: 0.12 },
+        );
+        const ground = (x, y) => carvedGround(profile.sections, sampleZ, x, y);
+        const report = assessRunoff(
+            spec.x,
+            spec.y,
+            spec.distances,
+            spec.designZ,
+            spec.lapM,
+            ground,
+            { trackWidthM: spec.trackWidthM, speedTrace: trace },
+        );
         layouts[name] = { trace, report };
     }
     console.log(JSON.stringify({ layouts }));

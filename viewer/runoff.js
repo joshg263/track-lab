@@ -1,5 +1,7 @@
 // Run-off zones as a layout constraint.
 // Starting estimates, not FIA figures. Line-for-line port of scripts/runoff.py.
+// Hairline outer edges are dropped onto the track. Ground samples use the
+// carved display surface where it covers the escape.
 
 import { analyzeCornersXY } from './layout_math.js';
 
@@ -26,6 +28,24 @@ export const TAPER_FRAC = 0.45;
 export const TAPER_MAX_M = 140.0;
 export const CLIP_BUFFER_M = 3.0;
 export const CLIP_SEARCH_STEPS = 18;
+// The escape may land one sample past v^2/(2 a). Further than this is a spike.
+export const DEPTH_MARGIN_M = 8.0;
+// Length over width of the fan in the approach frame.
+export const ASPECT_LIMIT = 8.0;
+// An outer edge this long, and this close to the track edge, is a sliver.
+export const SLIVER_EDGE_M = 12.0;
+export const SLIVER_ALT_M = 1.5;
+export const SLIVER_OFF_M = 1.0;
+// Length over thickness. An outer edge past this is a hairline even if it is
+// a couple of metres off the track.
+export const SLIVER_RATIO = 20.0;
+// Display carve in the viewer: design grade across the shoulder and one step,
+// then the same 1:2 catch as the earthworks mesh. Not the volume integral,
+// which starts the 1:2 at the pavement edge.
+export const DISPLAY_SHOULDER_M = 3.0;
+export const DISPLAY_STEP_M = 4.0;
+export const DISPLAY_SLOPE = 0.5;
+export const DISPLAY_CATCH_M = 80.0;
 
 export function speedFromTrace(trace, lapM, distanceM) {
     if (!trace || !trace.length || !(lapM > 0)) return null;
@@ -698,6 +718,62 @@ function buildFan(xy, distances, lapM, startM, endM, sign, halfWidth, depth, wid
         if (cleared) break;
     }
     if (apexS != null) overlapS = apexS;
+    // Keep the escape inside the stopping distance. A later sample can still
+    // sit on the edge where the track itself has run past that line.
+    const alongAt = (index, scale) => {
+        const p = at(index, scale);
+        return (p[0] - bx) * tx + (p[1] - by) * ty;
+    };
+    const limit = depth + DEPTH_MARGIN_M;
+    for (let index = 0; index < inner.length; index++) {
+        if (alongAt(index, ts[index]) <= limit) continue;
+        if (alongAt(index, 0) >= limit - 1e-9) {
+            ts[index] = 0;
+            continue;
+        }
+        let lo = 0;
+        let hi = ts[index];
+        for (let step = 0; step < CLIP_SEARCH_STEPS; step++) {
+            const mid = (lo + hi) * 0.5;
+            if (alongAt(index, mid) <= limit) lo = mid;
+            else hi = mid;
+        }
+        ts[index] = lo;
+    }
+    const offEdge = (px, py) => {
+        let best = 1e18;
+        for (let i = 0; i < inner.length - 1; i++) {
+            const dist = distPointSegment(
+                px, py, inner[i][0], inner[i][1], inner[i + 1][0], inner[i + 1][1],
+            );
+            if (dist < best) best = dist;
+        }
+        return best;
+    };
+    // A long outer edge that falls back onto the track is a hairline. Drop
+    // the far end onto the edge and repeat so the spike cannot reform.
+    for (let round = 0; round < inner.length; round++) {
+        let hit = null;
+        for (let i = 0; i < inner.length - 1; i++) {
+            const a = at(i, ts[i]);
+            const b = at(i + 1, ts[i + 1]);
+            const elen = Math.hypot(b[0] - a[0], b[1] - a[1]);
+            if (elen < SLIVER_EDGE_M) continue;
+            const d0 = offEdge(a[0], a[1]);
+            const d1 = offEdge(b[0], b[1]);
+            let alt = distPointSegment(inner[i][0], inner[i][1], a[0], a[1], b[0], b[1]);
+            const alt2 = distPointSegment(inner[i + 1][0], inner[i + 1][1], a[0], a[1], b[0], b[1]);
+            if (alt2 > alt) alt = alt2;
+            const far = d0 > d1 ? d0 : d1;
+            const hairline = alt < SLIVER_ALT_M || elen > alt * SLIVER_RATIO;
+            if (hairline && far > SLIVER_OFF_M) {
+                hit = d0 >= d1 ? i : i + 1;
+                break;
+            }
+        }
+        if (hit == null) break;
+        ts[hit] = 0;
+    }
     const outer = [];
     for (let index = 0; index < inner.length; index++) outer.push(at(index, ts[index]));
     let available = (outer[escapeEnd][0] - bx) * tx + (outer[escapeEnd][1] - by) * ty;
@@ -706,6 +782,11 @@ function buildFan(xy, distances, lapM, startM, endM, sign, halfWidth, depth, wid
     for (let i = outer.length - 1; i >= 0; i--) {
         const ox = outer[i][0];
         const oy = outer[i][1];
+        const ix = inner[i][0];
+        const iy = inner[i][1];
+        // On-edge outer vertices repeat the inner boundary. Leaving them out
+        // drops the zero-width spurs without moving the fan.
+        if (Math.abs(ox - ix) < 1e-6 && Math.abs(oy - iy) < 1e-6) continue;
         const last = ring[ring.length - 1];
         if (last && Math.abs(last[0] - ox) < 1e-9 && Math.abs(last[1] - oy) < 1e-9) continue;
         ring.push([ox, oy]);
@@ -765,6 +846,43 @@ function nearestEdgeS(inner, px, py, lapM) {
 function proxySpeed(radiusM, proxyLatG) {
     const radius = radiusM > 1 ? radiusM : 1;
     return Math.sqrt(proxyLatG * GRAVITY_MPS2 * radius);
+}
+
+export function carvedGround(sections, sampleGround, x, y) {
+    // Elevation of the display carve where it covers (x, y), else the DEM.
+    // Design grade out to the shoulder plus one flat step, then 1:2 until
+    // the original surface or the 80 m catch.
+    const ground = Number(sampleGround(x, y));
+    if (!sections || !sections.length) return ground;
+    let best = null;
+    let bestD = 1e18;
+    for (let i = 0; i < sections.length; i++) {
+        const section = sections[i];
+        const dx = section.x - x;
+        const dy = section.y - y;
+        const dist = dx * dx + dy * dy;
+        if (dist < bestD) {
+            bestD = dist;
+            best = section;
+        }
+    }
+    if (!best) return ground;
+    const lateral = (x - best.x) * best.nx + (y - best.y) * best.ny;
+    const ad = Math.abs(lateral);
+    const edge = best.half_m + DISPLAY_SHOULDER_M;
+    const flat = edge + DISPLAY_STEP_M;
+    const reach = edge + DISPLAY_CATCH_M;
+    if (ad > reach + 1e-6) return ground;
+    if (ad <= flat + 1e-6) return best.z_design;
+    const info = lateral >= 0 ? best.left : best.right;
+    const sign = info.slope_sign;
+    const fromShoulder = ad - flat;
+    if (sign !== 0 && fromShoulder <= DISPLAY_CATCH_M + 1e-6) {
+        const slopeZ = best.z_design + sign * fromShoulder * DISPLAY_SLOPE;
+        const crossed = sign > 0 ? slopeZ >= ground - 1e-6 : slopeZ <= ground + 1e-6;
+        if (!crossed) return slopeZ;
+    }
+    return ground;
 }
 
 export function assessRunoff(x, y, distances, designZ, lapM, sampleGround, options = {}) {

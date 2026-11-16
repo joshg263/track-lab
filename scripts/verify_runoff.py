@@ -35,9 +35,11 @@ from layout_check import (  # noqa: E402
     sample_dem,
 )
 from runoff import (  # noqa: E402
+    ASPECT_LIMIT,
     CLIP_BUFFER_M,
     DEFAULT_DECEL_G,
     DEFAULT_OVERLAP_GAP_M,
+    DEPTH_MARGIN_M,
     GRAVITY_MPS2,
     _approach_tangent,
     _dist_point_polygon,
@@ -50,7 +52,12 @@ from runoff import (  # noqa: E402
     _nearest_edge_s,
     _point_in_polygon,
     _turn_sign,
+    SLIVER_ALT_M,
+    SLIVER_EDGE_M,
+    SLIVER_OFF_M,
+    SLIVER_RATIO,
     assess_runoff,
+    carved_ground,
 )
 from corner_detection import analyze_corners_xy  # noqa: E402
 from vertical_profile import build_vertical_profile  # noqa: E402
@@ -507,13 +514,20 @@ def load_centreline(path: Path, dem, transform, site):
     lap = float(distances[-1] + np.linalg.norm(points[0, :2] - points[-1, :2]))
     width = float(layout.get("track_width_m", 14))
 
-    def ground(x, y):
+    def dem_at(x, y):
         return float(sample_dem(dem, transform, np.array([x]), np.array([y]), site)[0])
 
     profile = build_vertical_profile(
-        points[:, 0], points[:, 1], distances, points[:, 2], lap, width, ground,
+        points[:, 0], points[:, 1], distances, points[:, 2], lap, width, dem_at,
         max_grade=MAX_GRADIENT_PCT / 100.0,
     )
+    sections = profile["sections"]
+
+    def ground(x, y):
+        # The escape sits on the carved display surface beside the road, and
+        # on the DEM once that surface has run back into the hillside.
+        return carved_ground(sections, dem_at, x, y)
+
     return {
         "layout": layout,
         "x": points[:, 0],
@@ -610,6 +624,78 @@ def check_fan_geometry(prepared: dict, reports: dict) -> None:
                     )
             if corner["available_depth_m"] > corner["depth_m"] + 1e-3:
                 fail(f"{label} corner {corner['index']} available depth exceeds the required depth")
+            tx, ty = _approach_tangent(resampled, resampled_d, resample_lap, corner["turn_in_m"])
+            brake = min(
+                inner,
+                key=lambda point: min(
+                    _forward(point[2], corner["turn_in_m"], resample_lap),
+                    _forward(corner["turn_in_m"], point[2], resample_lap),
+                ),
+            )
+            bx, by = brake[0], brake[1]
+            nx, ny = -ty, tx
+            max_along = -1e18
+            min_along = 1e18
+            max_lat = 0.0
+            reach = -1e18
+            for px, py in polygon:
+                along = (px - bx) * tx + (py - by) * ty
+                lat = abs((px - bx) * nx + (py - by) * ny)
+                if along > max_along:
+                    max_along = along
+                if along < min_along:
+                    min_along = along
+                if lat > max_lat:
+                    max_lat = lat
+                off = 1e18
+                for i in range(len(inner) - 1):
+                    dist = _dist_point_segment(
+                        px, py, inner[i][0], inner[i][1], inner[i + 1][0], inner[i + 1][1],
+                    )
+                    if dist < off:
+                        off = dist
+                if off > 1.0 and along > reach:
+                    reach = along
+            span = max_along - min_along
+            short = span if span < max_lat else max_lat
+            long = max_lat if span < max_lat else span
+            if short > 0.5 and long / short > ASPECT_LIMIT:
+                fail(
+                    f"{label} corner {corner['index']} aspect {long / short:.1f} "
+                    f"exceeds {ASPECT_LIMIT:.0f} (length {long:.0f} m, width {short:.0f} m)"
+                )
+            outer = corner["outer"]
+            for i in range(len(outer) - 1):
+                ax, ay = outer[i]
+                bx2, by2 = outer[i + 1]
+                elen = math.hypot(bx2 - ax, by2 - ay)
+                if elen < SLIVER_EDGE_M:
+                    continue
+                alt = _dist_point_segment(inner[i][0], inner[i][1], ax, ay, bx2, by2)
+                alt2 = _dist_point_segment(inner[i + 1][0], inner[i + 1][1], ax, ay, bx2, by2)
+                if alt2 > alt:
+                    alt = alt2
+                off0 = 1e18
+                off1 = 1e18
+                for j in range(len(inner) - 1):
+                    off0 = min(off0, _dist_point_segment(
+                        ax, ay, inner[j][0], inner[j][1], inner[j + 1][0], inner[j + 1][1],
+                    ))
+                    off1 = min(off1, _dist_point_segment(
+                        bx2, by2, inner[j][0], inner[j][1], inner[j + 1][0], inner[j + 1][1],
+                    ))
+                far = off0 if off0 > off1 else off1
+                hairline = alt < SLIVER_ALT_M or elen > alt * SLIVER_RATIO
+                if hairline and far > SLIVER_OFF_M:
+                    fail(
+                        f"{label} corner {corner['index']} has a {elen:.0f} m sliver "
+                        f"only {alt:.2f} m thick"
+                    )
+            if reach > corner["depth_m"] + DEPTH_MARGIN_M + 0.05:
+                fail(
+                    f"{label} corner {corner['index']} extends {reach:.1f} m along the escape, "
+                    f"past depth {corner['depth_m']:.1f} m plus {DEPTH_MARGIN_M:.0f} m"
+                )
             speeds.append((corner["speed_mps"], corner["depth_m"]))
         speeds.sort()
         for left, right in zip(speeds, speeds[1:]):
@@ -619,7 +705,7 @@ def check_fan_geometry(prepared: dict, reports: dict) -> None:
                     f"({left[0] * 3.6:.0f} km/h → {left[1]:.0f} m, "
                     f"{right[0] * 3.6:.0f} km/h → {right[1]:.0f} m)"
                 )
-        print(f"fan geometry {label}: inner edge, clip clearance, depth vs speed")
+        print(f"fan geometry {label}: inner edge, clip clearance, depth vs speed, aspect, escape extent")
 
 
 def check_layouts(skip_js: bool) -> dict:

@@ -13,9 +13,12 @@ profile's entry speed when a trace is supplied, otherwise the corner-radius
 proxy sqrt(1.5 g R). Width is the lateral cap.
 
 Where the fan meets another part of the lap it is clipped, with a small
-buffer, and the shortfall is a fail. Terrain inside the clipped fan still has
-to stay under the slope limit and within the drop/wall step of the designed
-road-edge height.
+buffer, and the shortfall is a fail. A hairline outer edge is dropped back
+onto the track, and the escape is kept within the stopping distance. Terrain
+inside the clipped fan still has to stay under the slope limit and within
+the drop/wall step of the designed road-edge height. The ground sample is
+the carved display surface where that surface covers the escape, and the
+original terrain beyond it.
 
 The road edge is the designed deck. That deck is flat from the centreline to
 the edge, so its height is the vertical profile's z(s), not a terrain or mesh
@@ -63,6 +66,24 @@ TAPER_MAX_M = 140.0
 # Clear of the other track edge by this much after the half-width.
 CLIP_BUFFER_M = 3.0
 CLIP_SEARCH_STEPS = 18
+# The escape may land one sample past v^2/(2 a). Further than this is a spike.
+DEPTH_MARGIN_M = 8.0
+# Length over width of the fan in the approach frame.
+ASPECT_LIMIT = 8.0
+# An outer edge this long, and this close to the track edge, is a sliver.
+SLIVER_EDGE_M = 12.0
+SLIVER_ALT_M = 1.5
+SLIVER_OFF_M = 1.0
+# Length over thickness. An outer edge past this is a hairline even if it is
+# a couple of metres off the track.
+SLIVER_RATIO = 20.0
+# Display carve in the viewer: design grade across the shoulder and one step,
+# then the same 1:2 catch as the earthworks mesh. Not the volume integral,
+# which starts the 1:2 at the pavement edge.
+DISPLAY_SHOULDER_M = 3.0
+DISPLAY_STEP_M = 4.0
+DISPLAY_SLOPE = 0.5
+DISPLAY_CATCH_M = 80.0
 
 
 def speed_from_trace(trace: list[dict] | None, lap_m: float, distance_m: float) -> float | None:
@@ -791,6 +812,65 @@ def _build_fan(
     if apex_s is not None:
         overlap_s = apex_s
 
+    # Keep the escape inside the stopping distance. A later sample can still
+    # sit on the edge where the track itself has run past that line.
+    def _along_at(index: int, scale: float) -> float:
+        px, py = _at(index, scale)
+        return (px - bx) * tx + (py - by) * ty
+
+    limit = depth + DEPTH_MARGIN_M
+    for index in range(len(inner)):
+        if _along_at(index, ts[index]) <= limit:
+            continue
+        if _along_at(index, 0.0) >= limit - 1e-9:
+            ts[index] = 0.0
+            continue
+        lo = 0.0
+        hi = ts[index]
+        for _step in range(CLIP_SEARCH_STEPS):
+            mid = (lo + hi) * 0.5
+            if _along_at(index, mid) <= limit:
+                lo = mid
+            else:
+                hi = mid
+        ts[index] = lo
+
+    def _off_edge(px: float, py: float) -> float:
+        best = 1e18
+        n = len(inner)
+        for i in range(n - 1):
+            dist = _dist_point_segment(
+                px, py, inner[i][0], inner[i][1], inner[i + 1][0], inner[i + 1][1],
+            )
+            if dist < best:
+                best = dist
+        return best
+
+    # A long outer edge that falls back onto the track is a hairline. Drop
+    # the far end onto the edge and repeat so the spike cannot reform.
+    for _round in range(len(inner)):
+        hit = None
+        for i in range(len(inner) - 1):
+            ax, ay = _at(i, ts[i])
+            bx2, by2 = _at(i + 1, ts[i + 1])
+            elen = math.hypot(bx2 - ax, by2 - ay)
+            if elen < SLIVER_EDGE_M:
+                continue
+            d0 = _off_edge(ax, ay)
+            d1 = _off_edge(bx2, by2)
+            alt = _dist_point_segment(inner[i][0], inner[i][1], ax, ay, bx2, by2)
+            alt2 = _dist_point_segment(inner[i + 1][0], inner[i + 1][1], ax, ay, bx2, by2)
+            if alt2 > alt:
+                alt = alt2
+            far = d0 if d0 > d1 else d1
+            hairline = alt < SLIVER_ALT_M or elen > alt * SLIVER_RATIO
+            if hairline and far > SLIVER_OFF_M:
+                hit = i if d0 >= d1 else i + 1
+                break
+        if hit is None:
+            break
+        ts[hit] = 0.0
+
     outer = [_at(index, ts[index]) for index in range(len(inner))]
 
     # Depth is how far the (possibly clipped) escape reaches along the approach.
@@ -799,7 +879,13 @@ def _build_fan(
         available = 0.0
 
     ring = [(p[0], p[1]) for p in inner]
-    for ox, oy in reversed(outer):
+    for index in range(len(outer) - 1, -1, -1):
+        ox, oy = outer[index]
+        ix, iy, _s = inner[index]
+        # On-edge outer vertices repeat the inner boundary. Leaving them out
+        # drops the zero-width spurs without moving the fan.
+        if abs(ox - ix) < 1e-6 and abs(oy - iy) < 1e-6:
+            continue
         if ring and abs(ring[-1][0] - ox) < 1e-9 and abs(ring[-1][1] - oy) < 1e-9:
             continue
         ring.append((ox, oy))
@@ -853,6 +939,52 @@ def _nearest_edge_s(inner, px: float, py: float, lap_m: float) -> float:
 def _proxy_speed(radius_m: float, proxy_lat_g: float) -> float:
     radius = radius_m if radius_m > 1.0 else 1.0
     return math.sqrt(proxy_lat_g * GRAVITY_MPS2 * radius)
+
+
+def carved_ground(
+    sections: list[dict],
+    sample_ground: Callable[[float, float], float],
+    x: float,
+    y: float,
+) -> float:
+    """Elevation of the display carve where it covers (x, y), else the DEM.
+
+    Matches the viewer's earthworks mesh: design grade out to the shoulder
+    plus one flat step, then 1:2 until the original surface or the 80 m catch.
+    """
+    ground = float(sample_ground(x, y))
+    if not sections:
+        return ground
+    best = None
+    best_d = 1e18
+    for section in sections:
+        dx = float(section["x"]) - x
+        dy = float(section["y"]) - y
+        dist = dx * dx + dy * dy
+        if dist < best_d:
+            best_d = dist
+            best = section
+    if best is None:
+        return ground
+    lateral = (x - float(best["x"])) * float(best["nx"]) + (y - float(best["y"])) * float(best["ny"])
+    ad = abs(lateral)
+    half = float(best["half_m"])
+    edge = half + DISPLAY_SHOULDER_M
+    flat = edge + DISPLAY_STEP_M
+    reach = edge + DISPLAY_CATCH_M
+    if ad > reach + 1e-6:
+        return ground
+    if ad <= flat + 1e-6:
+        return float(best["z_design"])
+    info = best["left"] if lateral >= 0.0 else best["right"]
+    sign = float(info["slope_sign"])
+    from_shoulder = ad - flat
+    if sign != 0.0 and from_shoulder <= DISPLAY_CATCH_M + 1e-6:
+        slope_z = float(best["z_design"]) + sign * from_shoulder * DISPLAY_SLOPE
+        crossed = slope_z >= ground - 1e-6 if sign > 0.0 else slope_z <= ground + 1e-6
+        if not crossed:
+            return slope_z
+    return ground
 
 
 def assess_runoff(

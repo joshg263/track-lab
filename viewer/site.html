@@ -434,7 +434,7 @@
             stepOnboardLook,
         } from './drive_profile.js';
         import { Terrain, computeViewshed } from './viewshed.js';
-        import { assessRunoff } from './runoff.js';
+        import { assessRunoff, carvedGround } from './runoff.js';
 
         const params = new URLSearchParams(location.search);
         if (params.get('profile') === 'terrain') {
@@ -990,13 +990,17 @@
                 ? driveProfile.samples.map((s) => ({ distance: s.distance, speed_mps: s.speedMps }))
                 : null;
             const options = readRunoffOptions();
+            const sections = designEnabled() ? verticalProfile?.sections : null;
+            const sampleGround = sections?.length
+                ? (x, y) => carvedGround(sections, sampleZ, x, y)
+                : sampleZ;
             runoffReport = assessRunoff(
                 layoutPoints.map((p) => p.x),
                 layoutPoints.map((p) => p.y),
                 layoutPoints.map((p) => p.distance),
                 designZ,
                 liveMetrics.lapLengthM,
-                sampleZ,
+                sampleGround,
                 {
                     trackWidthM: trackWidthM(),
                     speedTrace: trace,
@@ -1070,8 +1074,11 @@
                 if (!inner || !outer || inner.length < 2 || inner.length !== outer.length) continue;
                 const n = inner.length;
                 const verts = [];
+                const sections = designEnabled() ? verticalProfile?.sections : null;
                 const place = (x, y) => {
-                    const elev = meshElevation(x, y);
+                    const elev = sections?.length
+                        ? carvedGround(sections, sampleZ, x, y)
+                        : meshElevation(x, y);
                     verts.push(x, elev - baseElevation + lift, -y);
                 };
                 for (const point of inner) place(point[0], point[1]);
