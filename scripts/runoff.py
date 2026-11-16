@@ -1,18 +1,21 @@
 """Run-off zones as a layout constraint.
 
 Starting estimates, not FIA figures. At each corner from the shared detector,
-the zone is a parallelogram on the outside of the approach: its width runs
-along the approach tangent and its depth runs along the escape direction
-(that tangent, turned toward the outside).
+the zone is a fan on the outside of the turn. Its inner boundary is the
+outside track edge from before turn-in through the exit taper. From the
+braking point the fan extends along the straight-on approach tangent for
+v^2 / (2 a), widens as the corner turns away from that line, and tapers back
+to the edge on the exit.
 
 Depth is v^2 / (2 a). Deceleration defaults to gravel at 0.5 g; tarmac is
 about 0.9 g and is the other setting the viewer offers. v is the speed
 profile's entry speed when a trace is supplied, otherwise the corner-radius
-proxy sqrt(1.5 g R).
+proxy sqrt(1.5 g R). Width is the lateral cap.
 
-A zone passes only when terrain inside it stays under the slope limit, stays
-within the drop/wall step of the designed road-edge height, and does not meet
-another part of the track more than overlap_gap metres away along the lap.
+Where the fan meets another part of the lap it is clipped, with a small
+buffer, and the shortfall is a fail. Terrain inside the clipped fan still has
+to stay under the slope limit and within the drop/wall step of the designed
+road-edge height.
 
 The road edge is the designed deck. That deck is flat from the centreline to
 the edge, so its height is the vertical profile's z(s), not a terrain or mesh
@@ -49,9 +52,17 @@ PROXY_LAT_G = 1.5
 ESCAPE_OUTWARD = 0.5
 TANGENT_LOOK_M = 4.0
 SAMPLE_SPACING_M = 5.0
-# Ribbon contact closer than this is an overlap. The zone begins on the
-# outside edge, so a fraction of a metre keeps a bare touch from counting.
-OVERLAP_MARGIN_M = 0.05
+# 5 m chords left a hairpin edge more than 0.5 m off the track.
+EDGE_STEP_M = 2.5
+LEAD_MIN_M = 20.0
+LEAD_FRAC = 0.15
+LEAD_MAX_M = 60.0
+TAPER_MIN_M = 30.0
+TAPER_FRAC = 0.45
+TAPER_MAX_M = 140.0
+# Clear of the other track edge by this much after the half-width.
+CLIP_BUFFER_M = 3.0
+CLIP_SEARCH_STEPS = 18
 
 
 def speed_from_trace(trace: list[dict] | None, lap_m: float, distance_m: float) -> float | None:
@@ -421,27 +432,422 @@ def _max_slopes(
     return max_long, max_cross
 
 
-def _zone_overlaps(
-    poly,
-    track_x,
-    track_y,
-    track_d,
+def _forward(start_m: float, end_m: float, lap_m: float) -> float:
+    if not (lap_m > 0):
+        return end_m - start_m
+    d = (end_m - start_m) % lap_m
+    if d < 0:
+        d += lap_m
+    return d
+
+
+def _gap_to_window(distance_m: float, s0: float, s2: float, lap_m: float) -> float:
+    """Chainage gap from distance_m to the forward window [s0, s2]."""
+    if not (lap_m > 0):
+        return 0.0
+    span = _forward(s0, s2, lap_m)
+    if span >= lap_m - 1e-6:
+        return 0.0
+    x = _forward(s0, distance_m, lap_m)
+    if x <= span:
+        return 0.0
+    return min(x - span, lap_m - x)
+
+
+def _insert_chain(samples: list[float], s0: float, lap_m: float, target: float) -> None:
+    fwd_t = _forward(s0, target, lap_m)
+    for i, s in enumerate(samples):
+        fwd = _forward(s0, s, lap_m)
+        if abs(fwd - fwd_t) < 0.05:
+            return
+        if fwd > fwd_t:
+            samples.insert(i, target % lap_m if lap_m > 0 else target)
+            return
+    samples.append(target % lap_m if lap_m > 0 else target)
+
+
+def _chain_samples(s0: float, s2: float, lap_m: float, step: float, extras: list[float]) -> list[float]:
+    span = _forward(s0, s2, lap_m)
+    if span < 1e-3:
+        return [s0 % lap_m if lap_m > 0 else s0]
+    n = max(1, int(math.ceil(span / step)))
+    samples = []
+    for i in range(n + 1):
+        s = s0 + span * i / n
+        samples.append(s % lap_m if lap_m > 0 else s)
+    for extra in extras:
+        _insert_chain(samples, s0, lap_m, extra)
+    return samples
+
+
+def _edge_frame(xy, distances, lap_m, distance_m, sign: int, half_width: float):
+    px, py = _sample_xy(xy, distances, lap_m, distance_m)
+    tx, ty = _travel_tangent(xy, distances, lap_m, distance_m)
+    nx, ny = _outside_normal(tx, ty, sign)
+    return px + nx * half_width, py + ny * half_width, tx, ty, nx, ny
+
+
+def _window_lengths(depth: float, corner_len: float, lap_m: float) -> tuple[float, float]:
+    lead = min(LEAD_MAX_M, max(LEAD_MIN_M, LEAD_FRAC * depth))
+    taper = min(TAPER_MAX_M, max(TAPER_MIN_M, TAPER_FRAC * depth))
+    room = max(0.0, lap_m - corner_len)
+    if lead + taper > room * 0.85 and lead + taper > 1e-6:
+        scale = room * 0.85 / (lead + taper)
+        lead *= scale
+        taper *= scale
+    if room > 8.0:
+        lead = max(8.0, lead) if lead > 0 else 8.0
+        if lead + taper > room * 0.85:
+            taper = max(0.0, room * 0.85 - lead)
+    return lead, taper
+
+
+def _blockers(track_x, track_y, track_d, lap_m, s0, s2, overlap_gap_m):
+    found = []
+    n = len(track_d)
+    for i in range(n):
+        gap = _gap_to_window(float(track_d[i]), s0, s2, lap_m)
+        if gap <= overlap_gap_m:
+            continue
+        found.append((float(track_x[i]), float(track_y[i]), float(track_d[i])))
+    return found
+
+
+def _segment_hit(ax, ay, bx, by, blockers, radius: float):
+    """Chainage of the closest blocker the segment comes within radius of."""
+    best = None
+    best_d = radius
+    for px, py, ps in blockers:
+        dist = _dist_point_segment(px, py, ax, ay, bx, by)
+        if dist < best_d:
+            best_d = dist
+            best = ps
+    return best
+
+
+def _segments_cross(ax, ay, bx, by, cx, cy, dx, dy) -> bool:
+    """Proper crossing. Shared endpoints do not count."""
+    rx = bx - ax
+    ry = by - ay
+    sx = dx - cx
+    sy = dy - cy
+    den = rx * sy - ry * sx
+    if abs(den) < 1e-9:
+        return False
+    qx = cx - ax
+    qy = cy - ay
+    t = (qx * sy - qy * sx) / den
+    u = (qx * ry - qy * rx) / den
+    return 1e-4 < t < 1.0 - 1e-4 and 1e-4 < u < 1.0 - 1e-4
+
+
+def _in_tri(px, py, ax, ay, bx, by, cx, cy) -> bool:
+    c1 = (bx - ax) * (py - ay) - (by - ay) * (px - ax)
+    c2 = (cx - bx) * (py - by) - (cy - by) * (px - bx)
+    c3 = (ax - cx) * (py - cy) - (ay - cy) * (px - cx)
+    if c1 >= -1e-6 and c2 >= -1e-6 and c3 >= -1e-6:
+        return True
+    return c1 <= 1e-6 and c2 <= 1e-6 and c3 <= 1e-6
+
+
+def _quad_hit(ax, ay, bx, by, cx, cy, dx, dy, blockers, radius: float):
+    """Chainage of a blocker inside the strip quad or within radius of its outer edges.
+
+    The quad is inner A, outer B, inner C, outer D. The inner edge A-C is the
+    track edge and is not a reason to pull the zone off the track.
+    """
+    best = None
+    best_d = radius
+    for px, py, ps in blockers:
+        inside = _in_tri(px, py, ax, ay, bx, by, cx, cy) or _in_tri(px, py, bx, by, dx, dy, cx, cy)
+        dist = _dist_point_segment(px, py, bx, by, dx, dy)
+        for ex, ey, fx, fy in ((ax, ay, bx, by), (cx, cy, dx, dy)):
+            edge = _dist_point_segment(px, py, ex, ey, fx, fy)
+            if edge < dist:
+                dist = edge
+        if inside or dist < best_d:
+            best_d = 0.0 if inside else dist
+            best = ps
+    return best
+
+
+def _shorten_ray(ax, ay, bx, by, blockers, radius: float):
+    """Farthest point from A toward B whose segment stays clear of blockers."""
+    hit = _segment_hit(ax, ay, bx, by, blockers, radius)
+    if hit is None:
+        return bx, by, None
+    lo = 0.0
+    hi = 1.0
+    found = hit
+    for _ in range(CLIP_SEARCH_STEPS):
+        mid = (lo + hi) * 0.5
+        mx = ax + (bx - ax) * mid
+        my = ay + (by - ay) * mid
+        step_hit = _segment_hit(ax, ay, mx, my, blockers, radius)
+        if step_hit is None:
+            lo = mid
+        else:
+            hi = mid
+            found = step_hit
+    return ax + (bx - ax) * lo, ay + (by - ay) * lo, found
+
+
+def _build_fan(
+    xy,
+    distances,
     lap_m,
     start_m,
     end_m,
+    sign,
     half_width,
+    depth,
+    width_m,
+    escape_tx,
+    escape_ty,
+    track_x,
+    track_y,
+    track_d,
     overlap_gap_m,
-) -> bool:
-    limit = half_width - OVERLAP_MARGIN_M
-    n = len(track_d)
-    for i in range(n):
-        gap = _chainage_gap(float(track_d[i]), start_m, end_m, lap_m)
-        if gap <= overlap_gap_m:
+):
+    """Outside fan. inner[i] is on the track edge; outer[i] is the clipped rim."""
+    corner_len = _forward(start_m, end_m, lap_m)
+    if corner_len < 1.0:
+        corner_len = 1.0
+    lead, taper = _window_lengths(depth, corner_len, lap_m)
+    s0 = (start_m - lead) % lap_m if lap_m > 0 else start_m - lead
+    s2 = (end_m + taper) % lap_m if lap_m > 0 else end_m + taper
+    window = _forward(s0, s2, lap_m)
+    samples = _chain_samples(s0, s2, lap_m, EDGE_STEP_M, [start_m, end_m])
+
+    bx, by, _rtx, _rty, nx, ny = _edge_frame(xy, distances, lap_m, start_m, sign, half_width)
+    tx, ty = escape_tx, escape_ty
+    blockers = _blockers(track_x, track_y, track_d, lap_m, s0, s2, overlap_gap_m)
+    radius = half_width + CLIP_BUFFER_M
+
+    inner = []
+    frames = []
+    for s in samples:
+        ex, ey, _ltx, _lty, lnx, lny = _edge_frame(xy, distances, lap_m, s, sign, half_width)
+        inner.append((ex, ey, s))
+        frames.append((lnx, lny))
+
+    # The braking sample is the one at start_m.
+    brake_index = 0
+    best_brake = 1e18
+    for index, (_ex, _ey, s) in enumerate(inner):
+        gap = min(_forward(start_m, s, lap_m), _forward(s, start_m, lap_m))
+        if gap < best_brake:
+            best_brake = gap
+            brake_index = index
+
+    # The straight escape is the outer edge from the brake out to depth.
+    # Stop it once the corner has turned off the approach, so a hairpin
+    # does not keep the straight line across the rest of the bend.
+    escape_end = brake_index
+    for index in range(brake_index, len(inner)):
+        ex, ey, _s = inner[index]
+        lnx, lny = frames[index]
+        agree = lnx * nx + lny * ny
+        along = (ex - bx) * tx + (ey - by) * ty
+        if index > brake_index and agree < 0.5:
+            break
+        escape_end = index
+        if index > brake_index and along >= depth:
+            break
+    if escape_end == brake_index and brake_index + 1 < len(inner):
+        escape_end = brake_index + 1
+    # Leave the exit samples for the taper back to the track edge.
+    taper_samples = max(2, int(round(taper / EDGE_STEP_M)))
+    taper_limit = len(inner) - 1 - taper_samples
+    if taper_limit < brake_index + 1:
+        taper_limit = brake_index + 1 if brake_index + 1 < len(inner) else brake_index
+    if escape_end > taper_limit:
+        escape_end = taper_limit
+
+    desired = []
+    for index, (ex, ey, s) in enumerate(inner):
+        lnx, lny = frames[index]
+        if index <= brake_index:
+            # Lead-in stays on the outside edge, so the zone starts there.
+            desired.append((ex, ey))
             continue
-        dist = _dist_point_polygon(float(track_x[i]), float(track_y[i]), poly)
-        if dist < limit:
-            return True
-    return False
+        if index <= escape_end:
+            span = escape_end - brake_index
+            u = (index - brake_index) / span
+            cross = (ex - bx) * nx + (ey - by) * ny
+            reach = -cross if cross < 0.0 else 0.0
+            if reach > width_m:
+                desired.append((ex + nx * width_m, ey + ny * width_m))
+            else:
+                desired.append((bx + tx * (depth * u), by + ty * (depth * u)))
+            continue
+        from_brake = _forward(start_m, s, lap_m)
+        if from_brake <= corner_len + 0.2:
+            u = 0.0 if corner_len < 1e-6 else from_brake / corner_len
+            if u < 0.0:
+                u = 0.0
+            elif u > 1.0:
+                u = 1.0
+            h = width_m * u
+        else:
+            into = from_brake - corner_len
+            u = 0.0 if taper < 1e-6 else into / taper
+            if u < 0.0:
+                u = 0.0
+            elif u > 1.0:
+                u = 1.0
+            h = width_m * (1.0 - u)
+        desired.append((ex + lnx * h, ey + lny * h))
+
+    ts = []
+    overlap_s = None
+    apex_s = None
+    for index, (ex, ey, _s) in enumerate(inner):
+        ox, oy = desired[index]
+        cx, cy, hit = _shorten_ray(ex, ey, ox, oy, blockers, radius)
+        dx = ox - ex
+        dy = oy - ey
+        len2 = dx * dx + dy * dy
+        if len2 < 1e-18:
+            ts.append(0.0)
+        else:
+            ts.append(((cx - ex) * dx + (cy - ey) * dy) / len2)
+        if hit is not None:
+            if overlap_s is None:
+                overlap_s = hit
+            if index == escape_end:
+                apex_s = hit
+
+    def _at(index: int, scale: float):
+        ex, ey, _s = inner[index]
+        return (
+            ex + (desired[index][0] - ex) * scale,
+            ey + (desired[index][1] - ey) * scale,
+        )
+
+    # Rays can miss another section while the chord between their ends cuts it.
+    # Pull neighbouring rays back until each strip quad is clear.
+    for _pass in range(6):
+        moved = False
+        for index in range(len(inner) - 1):
+            ax, ay = _at(index, ts[index])
+            bx2, by2 = _at(index + 1, ts[index + 1])
+            iex, iey, _s = inner[index]
+            jex, jey, _s2 = inner[index + 1]
+            if _quad_hit(iex, iey, ax, ay, jex, jey, bx2, by2, blockers, radius) is None:
+                continue
+            lo = 0.0
+            hi = 1.0
+            found = None
+            for _step in range(CLIP_SEARCH_STEPS):
+                mid = (lo + hi) * 0.5
+                ax, ay = _at(index, ts[index] * mid)
+                bx2, by2 = _at(index + 1, ts[index + 1] * mid)
+                hit = _quad_hit(iex, iey, ax, ay, jex, jey, bx2, by2, blockers, radius)
+                if hit is None:
+                    lo = mid
+                else:
+                    hi = mid
+                    found = hit
+            ts[index] *= lo
+            ts[index + 1] *= lo
+            if found is not None:
+                if overlap_s is None:
+                    overlap_s = found
+                if index == escape_end or index + 1 == escape_end:
+                    apex_s = found
+            moved = True
+        if not moved:
+            break
+
+    def _outer_cross(i: int, j: int) -> bool:
+        if abs(i - j) <= 1:
+            return False
+        ax, ay = _at(i, ts[i])
+        bx2, by2 = _at(i + 1, ts[i + 1])
+        cx, cy = _at(j, ts[j])
+        dx, dy = _at(j + 1, ts[j + 1])
+        return _segments_cross(ax, ay, bx2, by2, cx, cy, dx, dy)
+
+    for _round in range(len(inner)):
+        cleared = True
+        last = len(inner) - 1
+        for i in range(last):
+            for j in range(i):
+                if not _outer_cross(i, j):
+                    continue
+                cleared = False
+                # Drop the folded side onto the edge. If it already is the
+                # edge, the earlier side is the one crossing the track.
+                if ts[i] > 1e-6 or ts[i + 1] > 1e-6:
+                    ts[i] = 0.0
+                    ts[i + 1] = 0.0
+                else:
+                    ts[j] = 0.0
+                    ts[j + 1] = 0.0
+        if cleared:
+            break
+
+    if apex_s is not None:
+        overlap_s = apex_s
+
+    outer = [_at(index, ts[index]) for index in range(len(inner))]
+
+    # Depth is how far the (possibly clipped) escape reaches along the approach.
+    available = (outer[escape_end][0] - bx) * tx + (outer[escape_end][1] - by) * ty
+    if available < 0.0:
+        available = 0.0
+
+    ring = [(p[0], p[1]) for p in inner]
+    for ox, oy in reversed(outer):
+        if ring and abs(ring[-1][0] - ox) < 1e-9 and abs(ring[-1][1] - oy) < 1e-9:
+            continue
+        ring.append((ox, oy))
+    if len(ring) > 1 and abs(ring[0][0] - ring[-1][0]) < 1e-9 and abs(ring[0][1] - ring[-1][1]) < 1e-9:
+        ring.pop()
+
+    return {
+        "inner": inner,
+        "outer": outer,
+        "polygon": ring,
+        "brake_index": brake_index,
+        "available_depth_m": available,
+        "overlap_s": overlap_s,
+        "tx": tx,
+        "ty": ty,
+        "nx": nx,
+        "ny": ny,
+        "s0": s0,
+        "s2": s2,
+        "window_m": window,
+    }
+
+
+def _nearest_edge_s(inner, px: float, py: float, lap_m: float) -> float:
+    best_s = inner[0][2]
+    best_d = 1e18
+    n = len(inner)
+    for i in range(n - 1):
+        ax, ay, sa = inner[i]
+        bx, by, sb = inner[i + 1]
+        dx = bx - ax
+        dy = by - ay
+        len2 = dx * dx + dy * dy
+        if len2 < 1e-12:
+            t = 0.0
+        else:
+            t = ((px - ax) * dx + (py - ay) * dy) / len2
+            if t < 0.0:
+                t = 0.0
+            elif t > 1.0:
+                t = 1.0
+        qx = ax + dx * t
+        qy = ay + dy * t
+        dist = (px - qx) * (px - qx) + (py - qy) * (py - qy)
+        if dist < best_d:
+            best_d = dist
+            best_s = (sa + t * _forward(sa, sb, lap_m)) % lap_m if lap_m > 0 else sa + t * (sb - sa)
+    return best_s
 
 
 def _proxy_speed(radius_m: float, proxy_lat_g: float) -> float:
@@ -508,31 +914,27 @@ def assess_runoff(
         )
         tx, ty = _approach_tangent(resampled, resampled_d, resample_lap, start_m)
         nx, ny = _outside_normal(tx, ty, sign)
-        ex, ey = _escape(tx, ty, sign)
-        cx, cy = _sample_xy(resampled, resampled_d, resample_lap, start_m)
-        ax = cx + nx * half_width
-        ay = cy + ny * half_width
-        bx = ax + tx * width_m
-        by = ay + ty * width_m
-        dx = ax + ex * depth
-        dy = ay + ey * depth
-        cpx = bx + ex * depth
-        cpy = by + ey * depth
-        poly = [(ax, ay), (bx, by), (cpx, cpy), (dx, dy)]
+        fan = _build_fan(
+            resampled, resampled_d, resample_lap, start_m, end_m, sign, half_width, depth, width_m,
+            tx, ty, x, y, distances, float(overlap_gap_m),
+        )
+        # Straight-on escape is the approach tangent. Slope is measured in that frame.
+        ex, ey = tx, ty
+        px, py = nx, ny
+        poly = fan["polygon"]
+        inner = fan["inner"]
 
         z_edge = _interp_closed(distances, design_z, lap_m, start_m)
         samples = _interior_samples(poly, SAMPLE_SPACING_M, sample_ground)
         usable = []
         edge_z = []
         for ix, iy, sx, sy, sz in samples:
-            z_ref = _road_edge_z(
-                distances, design_z, lap_m, poly, sx, sy, start_m, width_m,
-            )
+            edge_s = _nearest_edge_s(inner, sx, sy, lap_m)
+            z_ref = _interp_closed(distances, design_z, lap_m, edge_s)
             if not math.isfinite(sz):
                 sz = z_ref - step_m - 1.0
             usable.append((ix, iy, sx, sy, sz))
             edge_z.append(z_ref)
-        px, py = -ey, ex
         long_slope, cross_slope = _max_slopes(usable, ex, ey, px, py)
         max_drop = 0.0
         max_wall = 0.0
@@ -562,12 +964,15 @@ def assess_runoff(
             reasons.append("drop")
         if max_wall > step_m:
             reasons.append("wall")
-        overlap = _zone_overlaps(
-            poly, x, y, distances, lap_m, start_m, end_m, half_width, float(overlap_gap_m),
-        )
+        overlap_s = fan["overlap_s"]
+        available = float(fan["available_depth_m"])
+        if available > depth:
+            available = depth
+        overlap = overlap_s is not None
         if overlap:
-            reasons.append("overlap")
-        terrain_fail = any(r != "overlap" for r in reasons)
+            at = start_m if overlap_s is None else float(overlap_s)
+            reasons.append(f"overlaps track section at s={int(round(at))}")
+        terrain_fail = any(not r.startswith("overlaps") for r in reasons)
         earthworks_m3 = (cut_m3 + fill_m3) if terrain_fail else 0.0
 
         corners.append({
@@ -579,6 +984,7 @@ def assess_runoff(
             "speed_mps": speed,
             "speed_source": speed_source,
             "depth_m": depth,
+            "available_depth_m": available,
             "width_m": width_m,
             "passed": len(reasons) == 0,
             "reasons": reasons,
@@ -587,12 +993,15 @@ def assess_runoff(
             "max_drop_m": max_drop,
             "max_wall_m": max_wall,
             "overlap": overlap,
+            "overlap_s": None if overlap_s is None else float(overlap_s),
             "cut_m3": cut_m3,
             "fill_m3": fill_m3,
             "earthworks_m3": earthworks_m3,
             "z_edge_m": z_edge,
             "area_m2": area,
             "polygon": [[p[0], p[1]] for p in poly],
+            "inner": [[p[0], p[1], p[2]] for p in inner],
+            "outer": [[p[0], p[1]] for p in fan["outer"]],
         })
 
     passed = sum(1 for c in corners if c["passed"])

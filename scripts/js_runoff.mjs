@@ -117,20 +117,41 @@ function zoneGround(spec) {
             const poly = zone.polygon;
             if (!pointInPolygon(x, y, poly)) continue;
             if (turnInOnly) return interp(zone.turnInM);
-            const ax = poly[0][0];
-            const ay = poly[0][1];
-            const ux = poly[1][0] - ax;
-            const uy = poly[1][1] - ay;
-            const vx = poly[3][0] - ax;
-            const vy = poly[3][1] - ay;
-            const det = ux * vy - uy * vx;
-            let u = 0;
-            if (Math.abs(det) >= 1e-9) {
-                u = ((x - ax) * vy - (y - ay) * vx) / det;
-                if (u < 0) u = 0;
-                else if (u > 1) u = 1;
+            const inner = zone.inner || [];
+            let bestS = zone.turnInM;
+            let bestD = Infinity;
+            for (let i = 0; i < inner.length - 1; i++) {
+                const ax = inner[i][0];
+                const ay = inner[i][1];
+                const sa = inner[i][2];
+                const bx = inner[i + 1][0];
+                const by = inner[i + 1][1];
+                const sb = inner[i + 1][2];
+                const dx = bx - ax;
+                const dy = by - ay;
+                const len2 = dx * dx + dy * dy;
+                let t = 0;
+                if (len2 >= 1e-12) {
+                    t = ((x - ax) * dx + (y - ay) * dy) / len2;
+                    if (t < 0) t = 0;
+                    else if (t > 1) t = 1;
+                }
+                const qx = ax + dx * t;
+                const qy = ay + dy * t;
+                const dist = (x - qx) * (x - qx) + (y - qy) * (y - qy);
+                if (dist < bestD) {
+                    bestD = dist;
+                    let span = lapM > 0 ? (sb - sa) % lapM : sb - sa;
+                    if (span < 0) span += lapM;
+                    let s = sa + t * span;
+                    if (lapM > 0) {
+                        s %= lapM;
+                        if (s < 0) s += lapM;
+                    }
+                    bestS = s;
+                }
             }
-            return interp(zone.turnInM + u * zone.widthM);
+            return interp(bestS);
         }
         return 100;
     };

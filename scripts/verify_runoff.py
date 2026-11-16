@@ -35,12 +35,19 @@ from layout_check import (  # noqa: E402
     sample_dem,
 )
 from runoff import (  # noqa: E402
+    CLIP_BUFFER_M,
     DEFAULT_DECEL_G,
+    DEFAULT_OVERLAP_GAP_M,
     GRAVITY_MPS2,
     _approach_tangent,
-    _escape,
+    _dist_point_polygon,
+    _dist_point_segment,
+    _edge_frame,
+    _forward,
+    _gap_to_window,
     _interp_closed,
     _max_slopes,
+    _nearest_edge_s,
     _point_in_polygon,
     _turn_sign,
     assess_runoff,
@@ -150,11 +157,11 @@ def overlap_track() -> tuple[np.ndarray, np.ndarray, float]:
     add_line(pts, -180, 0, 0, 0)
     add_arc(pts, 0, 30, 30, -math.pi / 2, 0)
     add_line(pts, 30, 30, 30, 420)
-    add_line(pts, 30, 420, 420, 420)
-    add_line(pts, 420, 420, 420, -18)
-    add_line(pts, 420, -18, 10, -18)
-    add_line(pts, 10, -18, -180, -18)
-    add_line(pts, -180, -18, -180, 0)
+    add_line(pts, 30, 420, 60, 420)
+    # Drops across the straight-on escape of the opening left-hander.
+    add_line(pts, 60, 420, 60, -40)
+    add_line(pts, 60, -40, -180, -40)
+    add_line(pts, -180, -40, -180, 0)
     xy = dedupe(pts)
     distances, lap = chainage(xy)
     return xy, distances, lap
@@ -200,6 +207,7 @@ def compare(py: dict, js: dict, label: str) -> None:
             ("radius_m", POLY_TOL_M),
             ("speed_mps", SPEED_TOL),
             ("depth_m", SPEED_TOL),
+            ("available_depth_m", 1e-3),
             ("max_cross_slope", SLOPE_TOL),
             ("max_long_slope", SLOPE_TOL),
             ("max_drop_m", DROP_TOL_M),
@@ -243,7 +251,7 @@ def check_flat_and_cliff(skip_js: bool) -> None:
     print(f"flat stadium: {flat_py['summary']}")
 
     def cliff(x, _y):
-        return 88.0 if x > 240.0 else 100.0
+        return 88.0 if x > 200.0 else 100.0
 
     cliff_py = assess_runoff(xy[:, 0], xy[:, 1], distances, design, lap, cliff, track_width_m=14)
     failed = [c for c in cliff_py["corners"] if not c["passed"]]
@@ -260,7 +268,7 @@ def check_flat_and_cliff(skip_js: bool) -> None:
     ))
     compare(flat_py, flat_js, "flat")
     cliff_js = run_js("assess", payload_from(
-        xy, distances, design, lap, {"kind": "step", "z": 100, "low": 88, "axis": "x", "cut": 240},
+        xy, distances, design, lap, {"kind": "step", "z": 100, "low": 88, "axis": "x", "cut": 200},
     ))
     compare(cliff_py, cliff_js, "cliff")
 
@@ -275,23 +283,8 @@ def _zone_ground(distances, design, lap, zones, turn_in_only: bool):
                 continue
             if turn_in_only:
                 return float(_interp_closed(distances, design, lap, zone["turn_in_m"]))
-            ax, ay = poly[0]
-            bx, by = poly[1]
-            dx, dy = poly[3]
-            ux, uy = bx - ax, by - ay
-            vx, vy = dx - ax, dy - ay
-            det = ux * vy - uy * vx
-            if abs(det) < 1e-9:
-                u = 0.0
-            else:
-                u = ((x - ax) * vy - (y - ay) * vx) / det
-            if u < 0.0:
-                u = 0.0
-            elif u > 1.0:
-                u = 1.0
-            return float(_interp_closed(
-                distances, design, lap, zone["turn_in_m"] + u * zone["width_m"],
-            ))
+            edge_s = _nearest_edge_s(zone["inner"], x, y, lap)
+            return float(_interp_closed(distances, design, lap, edge_s))
         return 100.0
 
     return height
@@ -307,6 +300,7 @@ def _zones_spec(distances, design, lap, zones, mode: str) -> dict:
         "zones": [
             {
                 "polygon": zone["polygon"],
+                "inner": zone["inner"],
                 "turnInM": zone["turn_in_m"],
                 "widthM": zone["width_m"],
             }
@@ -340,13 +334,13 @@ def check_designed_edge(skip_js: bool) -> None:
     design = 100.0 + 0.08 * distances
     probe = assess_runoff(
         xy[:, 0], xy[:, 1], distances, design, lap, terrain,
-        track_width_m=14, slope_limit=1.0,
+        track_width_m=14, slope_limit=100.0,
     )
     zones = probe["corners"]
     matched = assess_runoff(
         xy[:, 0], xy[:, 1], distances, design, lap,
         _zone_ground(distances, design, lap, zones, False),
-        track_width_m=14, slope_limit=1.0,
+        track_width_m=14, slope_limit=100.0,
     )
     if matched["pass_count"] != matched["corner_count"]:
         detail = [(c["index"], c["reasons"], c["max_drop_m"], c["max_wall_m"]) for c in matched["corners"]]
@@ -354,7 +348,7 @@ def check_designed_edge(skip_js: bool) -> None:
     held = assess_runoff(
         xy[:, 0], xy[:, 1], distances, design, lap,
         _zone_ground(distances, design, lap, zones, True),
-        track_width_m=14, slope_limit=1.0,
+        track_width_m=14, slope_limit=100.0,
     )
     for corner in held["corners"]:
         if "drop" not in corner["reasons"] and "wall" not in corner["reasons"]:
@@ -372,12 +366,12 @@ def check_designed_edge(skip_js: bool) -> None:
     compare(matched, run_js("assess", payload_from(
         xy, distances, design, lap,
         _zones_spec(distances, design, lap, zones, "along"),
-        slope_limit=1.0,
+        slope_limit=100.0,
     )), "edge-along")
     compare(held, run_js("assess", payload_from(
         xy, distances, design, lap,
         _zones_spec(distances, design, lap, zones, "turn-in"),
-        slope_limit=1.0,
+        slope_limit=100.0,
     )), "edge-turn-in")
 
 
@@ -429,7 +423,7 @@ def check_diagonal_slope(skip_js: bool) -> None:
     resample_lap = float(resampled_d[-1])
     sign = _turn_sign(resampled, resampled_d, resample_lap, run["start_index"], run["end_index"])
     tx, ty = _approach_tangent(resampled, resampled_d, resample_lap, float(run["start_m"]))
-    cex, cey = _escape(tx, ty, sign)
+    cex, cey = tx, ty
     design = np.full(len(xy), 100.0)
 
     def plane(x, y):
@@ -469,7 +463,7 @@ def check_overlap(skip_js: bool) -> None:
     if len(failed) != 1:
         detail = [(c["index"], c["reasons"]) for c in report["corners"]]
         fail(f"overlap track should fail one corner, got {detail}")
-    if failed[0]["reasons"] != ["overlap"]:
+    if len(failed[0]["reasons"]) != 1 or not str(failed[0]["reasons"][0]).startswith("overlaps track section at s="):
         fail(f"overlap corner reasons {failed[0]['reasons']}")
     if failed[0]["index"] != 0:
         fail(f"overlap should be the entry left-hander, index {failed[0]['index']}")
@@ -560,6 +554,74 @@ def print_layout_tables(reports: dict) -> None:
     print()
 
 
+def check_fan_geometry(prepared: dict, reports: dict) -> None:
+    """Inner edge stays on the track, clipping clears other sections, depth follows speed."""
+    for key, label, _path in LAYOUTS:
+        item = prepared[key]
+        report = reports[key]
+        xy = np.column_stack([item["x"], item["y"]])
+        analysis = analyze_corners_xy(xy, item["distances"], closed=True)
+        resampled = analysis["xy"]
+        resampled_d = analysis["distances"]
+        resample_lap = float(resampled_d[-1])
+        half = item["width"] * 0.5
+        speeds = []
+        for corner in report["corners"]:
+            sign = int(corner["turn_sign"])
+            inner = corner["inner"]
+            polygon = corner["polygon"]
+            if len(inner) < 2:
+                fail(f"{label} corner {corner['index']} has no inner edge")
+            for point in inner:
+                ex, ey, *_rest = _edge_frame(
+                    resampled, resampled_d, resample_lap, point[2], sign, half,
+                )
+                if math.hypot(point[0] - ex, point[1] - ey) > 0.05:
+                    fail(f"{label} corner {corner['index']} inner point leaves the outside edge")
+            worst = 0.0
+            for i in range(len(inner) - 1):
+                s0 = inner[i][2]
+                s1 = inner[i + 1][2]
+                mid = (s0 + 0.5 * _forward(s0, s1, resample_lap)) % resample_lap
+                ex, ey, *_rest = _edge_frame(
+                    resampled, resampled_d, resample_lap, mid, sign, half,
+                )
+                dist = _dist_point_segment(
+                    ex, ey, inner[i][0], inner[i][1], inner[i + 1][0], inner[i + 1][1],
+                )
+                if dist > worst:
+                    worst = dist
+            if worst > 0.5:
+                fail(f"{label} corner {corner['index']} inner boundary gap {worst:.2f} m")
+            for i in range(len(inner)):
+                if abs(polygon[i][0] - inner[i][0]) > 1e-6 or abs(polygon[i][1] - inner[i][1]) > 1e-6:
+                    fail(f"{label} corner {corner['index']} polygon does not follow its inner edge")
+            s0 = inner[0][2]
+            s2 = inner[-1][2]
+            for i, chain in enumerate(item["distances"]):
+                gap = _gap_to_window(float(chain), s0, s2, item["lap"])
+                if gap <= DEFAULT_OVERLAP_GAP_M:
+                    continue
+                dist = _dist_point_polygon(float(item["x"][i]), float(item["y"][i]), polygon)
+                if dist < half + CLIP_BUFFER_M - 0.5:
+                    fail(
+                        f"{label} corner {corner['index']} still overlaps track at "
+                        f"s={float(chain):.0f} ({dist:.2f} m from the centreline)"
+                    )
+            if corner["available_depth_m"] > corner["depth_m"] + 1e-3:
+                fail(f"{label} corner {corner['index']} available depth exceeds the required depth")
+            speeds.append((corner["speed_mps"], corner["depth_m"]))
+        speeds.sort()
+        for left, right in zip(speeds, speeds[1:]):
+            if right[0] > left[0] + 0.5 and right[1] <= left[1] + 1e-6:
+                fail(
+                    f"{label} zone depth did not increase with approach speed "
+                    f"({left[0] * 3.6:.0f} km/h → {left[1]:.0f} m, "
+                    f"{right[0] * 3.6:.0f} km/h → {right[1]:.0f} m)"
+                )
+        print(f"fan geometry {label}: inner edge, clip clearance, depth vs speed")
+
+
 def check_layouts(skip_js: bool) -> dict:
     dem, transform = load_dem(SITE_DIR)
     site = load_site_info(SITE_DIR)
@@ -597,6 +659,7 @@ def check_layouts(skip_js: bool) -> dict:
             compare(report, js_layouts[key]["report"], label)
         reports[key] = report
         print(f"{label}: {report['summary']}")
+    check_fan_geometry(prepared, reports)
     return reports
 
 

@@ -177,6 +177,21 @@
             border-radius: 4px; padding: 3px 4px; font-family: monospace; font-size: 11px;
         }
         .runoff-note { font-size: 10px; color: #999; line-height: 1.35; margin: 2px 0 6px; }
+        #runoff-reasons-wrap {
+            max-height: 220px; overflow: auto; margin-top: 4px;
+            border: 1px solid #333; border-radius: 4px;
+        }
+        #runoff-reasons { width: 100%; border-collapse: collapse; }
+        #runoff-reasons th, #runoff-reasons td {
+            font-size: 10px; padding: 2px 3px; text-align: left;
+            font-family: monospace; white-space: nowrap;
+        }
+        #runoff-reasons th { color: #888; position: sticky; top: 0; background: #111; }
+        #runoff-reasons td.reason { white-space: normal; color: #ccc; max-width: 120px; }
+        #runoff-reasons tr { cursor: pointer; }
+        #runoff-reasons tr.is-fail td.num { color: #ff8a8a; }
+        #runoff-reasons tr.is-pass td.num { color: #7dffb3; }
+        #runoff-reasons tr.is-active { background: rgba(255, 255, 255, 0.14); }
         #lap-estimate { font-size: 11px; color: #f9ca24; margin-top: 3px; font-family: monospace; }
         #car-settings { margin-top: 8px; }
         #car-settings .car-note { font-size: 10px; color: #999; line-height: 1.35; }
@@ -357,7 +372,13 @@
             <label>Slope <input id="runoff-slope" type="number" min="1" max="30" step="1" value="10"> %</label>
             <label>Step <input id="runoff-step" type="number" min="0.5" max="20" step="0.5" value="3"> m</label>
         </div>
-        <p class="runoff-note">Green passes the terrain check. Red fails it.</p>
+        <p class="runoff-note">Green passes the terrain check. Red fails it. Hover or click a corner to highlight its zone.</p>
+        <div id="runoff-reasons-wrap">
+            <table id="runoff-reasons">
+                <thead><tr><th>#</th><th>km/h</th><th>Need</th><th>Have</th><th>Reason</th></tr></thead>
+                <tbody></tbody>
+            </table>
+        </div>
     </div>
 
     <div id="stats" class="panel">
@@ -473,6 +494,8 @@
         let driveProfile = null;
         let runoffReport = null;
         let runoffGroup = null;
+        let runoffPinned = -1;
+        let runoffHover = -1;
         let heliOrbit = 0.55;
         let savedOrbit = null;
         let carMarker = null;
@@ -954,6 +977,8 @@
         }
 
         function rebuildRunoff() {
+            runoffPinned = -1;
+            runoffHover = -1;
             runoffReport = null;
             if (!layoutPoints || !liveMetrics || layoutPoints.length < 8) return;
             // The designed deck is flat from centreline to road edge, so the
@@ -990,24 +1015,75 @@
             runoffGroup = null;
         }
 
+        function runoffActiveIndex() {
+            return runoffHover >= 0 ? runoffHover : runoffPinned;
+        }
+
+        function paintRunoffHighlight() {
+            const active = runoffActiveIndex();
+            if (runoffGroup) {
+                for (const mesh of runoffGroup.children) {
+                    const on = active < 0 || mesh.userData.cornerIndex === active;
+                    const passed = mesh.userData.passed;
+                    mesh.material.opacity = active < 0 ? 0.72 : (on ? 0.92 : 0.16);
+                    mesh.material.color.setHex(
+                        on
+                            ? (passed ? 0x3dff8a : 0xff5a5a)
+                            : (passed ? 0x1f9d55 : 0xd64545),
+                    );
+                    mesh.renderOrder = on ? 11 : 9;
+                }
+            }
+            const rows = document.querySelectorAll('#runoff-reasons tbody tr');
+            for (const row of rows) {
+                row.classList.toggle('is-active', Number(row.dataset.index) === active);
+            }
+        }
+
+        function renderRunoffReasons() {
+            const body = document.querySelector('#runoff-reasons tbody');
+            if (!body) return;
+            const corners = runoffReport?.corners || [];
+            if (runoffPinned >= corners.length) runoffPinned = -1;
+            body.innerHTML = corners.map((corner) => {
+                const reason = corner.reasons?.length ? corner.reasons.join(', ') : '—';
+                const cls = corner.passed ? 'is-pass' : 'is-fail';
+                const speed = Math.round((corner.speed_mps || 0) * 3.6);
+                const need = Math.round(corner.depth_m || 0);
+                const have = Math.round(corner.available_depth_m || 0);
+                return `<tr data-index="${corner.index}" class="${cls}">`
+                    + `<td class="num">${corner.index + 1}</td>`
+                    + `<td>${speed}</td><td>${need}</td><td>${have}</td>`
+                    + `<td class="reason">${reason}</td></tr>`;
+            }).join('');
+            paintRunoffHighlight();
+        }
+
         function addRunoffZones(eye) {
             clearRunoffZones();
             if (!runoffReport || !world || !document.getElementById('show-runoff')?.checked) return;
             runoffGroup = new THREE.Group();
             const lift = eye ? 0.45 : 0.8;
             for (const corner of runoffReport.corners) {
-                const poly = corner.polygon;
-                if (!poly || poly.length < 4) continue;
+                const inner = corner.inner;
+                const outer = corner.outer;
+                if (!inner || !outer || inner.length < 2 || inner.length !== outer.length) continue;
+                const n = inner.length;
                 const verts = [];
-                for (const pair of poly) {
-                    const x = pair[0];
-                    const y = pair[1];
+                const place = (x, y) => {
                     const elev = meshElevation(x, y);
                     verts.push(x, elev - baseElevation + lift, -y);
+                };
+                for (const point of inner) place(point[0], point[1]);
+                for (const point of outer) place(point[0], point[1]);
+                const indices = [];
+                for (let i = 0; i < n - 1; i++) {
+                    indices.push(i, n + i, i + 1);
+                    indices.push(n + i, n + i + 1, i + 1);
                 }
                 const geo = new THREE.BufferGeometry();
                 geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
-                geo.setIndex([0, 1, 2, 0, 2, 3]);
+                geo.setIndex(indices);
                 geo.computeVertexNormals();
                 const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
                     color: corner.passed ? 0x1f9d55 : 0xd64545,
@@ -1022,10 +1098,13 @@
                     polygonOffsetFactor: -2,
                     polygonOffsetUnits: -2,
                 }));
+                mesh.userData.cornerIndex = corner.index;
+                mesh.userData.passed = corner.passed;
                 mesh.renderOrder = 9;
                 runoffGroup.add(mesh);
             }
             world.add(runoffGroup);
+            paintRunoffHighlight();
         }
 
         function addRacingLine(eye, lift) {
@@ -1221,6 +1300,7 @@
             }).join('');
 
             document.getElementById('layout-stats').style.display = 'block';
+            renderRunoffReasons();
         }
 
         function disposeTerrainObject(root) {
@@ -3773,6 +3853,7 @@
                 runoffSummary() {
                     if (!runoffReport) return null;
                     const cell = document.querySelector('[data-check="runoff"] td:last-child');
+                    const rows = document.querySelectorAll('#runoff-reasons tbody tr').length;
                     return {
                         summary: runoffReport.summary,
                         passCount: runoffReport.pass_count,
@@ -3781,7 +3862,47 @@
                         estimate: runoffReport.estimate,
                         line: cell ? cell.textContent : '',
                         zoneCount: runoffGroup ? runoffGroup.children.length : 0,
+                        reasonRows: rows,
+                        highlight: runoffActiveIndex(),
+                        corners: runoffReport.corners.map((c) => ({
+                            index: c.index,
+                            speedKmh: c.speed_mps * 3.6,
+                            radiusM: c.radius_m,
+                            depthM: c.depth_m,
+                            availableM: c.available_depth_m,
+                            passed: c.passed,
+                            reasons: c.reasons,
+                        })),
                     };
+                },
+                focusRunoff(index) {
+                    const corner = runoffReport?.corners?.[index];
+                    if (!corner?.polygon?.length || !camera || !controls) return false;
+                    runoffPinned = index;
+                    runoffHover = -1;
+                    paintRunoffHighlight();
+                    document.querySelector(`#runoff-reasons tbody tr[data-index="${index}"]`)
+                        ?.scrollIntoView({ block: 'center', inline: 'nearest' });
+                    if (cameraMode !== 'orbit') enterOrbit(false);
+                    let minX = Infinity;
+                    let maxX = -Infinity;
+                    let minY = Infinity;
+                    let maxY = -Infinity;
+                    for (const pair of corner.polygon) {
+                        if (pair[0] < minX) minX = pair[0];
+                        if (pair[0] > maxX) maxX = pair[0];
+                        if (pair[1] < minY) minY = pair[1];
+                        if (pair[1] > maxY) maxY = pair[1];
+                    }
+                    const cx = (minX + maxX) / 2;
+                    const cz = -((minY + maxY) / 2);
+                    const size = Math.max(maxX - minX, maxY - minY, 90);
+                    const dist = size * 1.55;
+                    camera.position.set(cx + dist * 0.05, dist * 0.72, cz + dist * 0.28);
+                    controls.target.set(cx, 0, cz);
+                    controls.update();
+                    setShadowArea(new THREE.Vector3(cx, 0, cz), Math.max(size * 3, 400));
+                    return true;
                 },
                 profileSummary() {
                     if (!driveProfile) return null;
@@ -3961,6 +4082,25 @@
             });
             document.getElementById('show-runoff').addEventListener('change', () => {
                 if (layoutPoints) buildTrackRibbon();
+            });
+            const runoffBody = document.querySelector('#runoff-reasons tbody');
+            runoffBody.addEventListener('mouseover', (e) => {
+                const row = e.target.closest('tr');
+                if (!row) return;
+                runoffHover = Number(row.dataset.index);
+                paintRunoffHighlight();
+            });
+            runoffBody.addEventListener('mouseout', (e) => {
+                if (e.relatedTarget && runoffBody.contains(e.relatedTarget)) return;
+                runoffHover = -1;
+                paintRunoffHighlight();
+            });
+            runoffBody.addEventListener('click', (e) => {
+                const row = e.target.closest('tr');
+                if (!row) return;
+                const index = Number(row.dataset.index);
+                runoffPinned = runoffPinned === index ? -1 : index;
+                paintRunoffHighlight();
             });
             for (const id of ['runoff-decel', 'runoff-width', 'runoff-slope', 'runoff-step']) {
                 document.getElementById(id).addEventListener('change', () => {
