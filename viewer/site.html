@@ -148,6 +148,14 @@
         }
         #camera-modes button, #stand-list button, #stand-tools button { flex: 1 1 42%; margin: 0; }
         #stand-list button { flex: 1 1 100%; text-align: left; }
+        #stand-place-hint {
+            display: none;
+            font-size: 11px;
+            color: #f9ca24;
+            line-height: 1.35;
+            margin: 4px 0;
+            flex: 1 1 100%;
+        }
         #drive-readout {
             font-family: monospace; font-size: 12px; color: #00ffcc; margin-top: 4px; line-height: 1.45;
         }
@@ -238,6 +246,7 @@
             <div id="stand-tools">
                 <button id="btn-place-stand" type="button" class="secondary">Place stand</button>
                 <button id="btn-delete-stand" type="button" class="secondary" disabled>Delete stand</button>
+                <div id="stand-place-hint">Click to place · drag to look around · Esc to exit</div>
             </div>
             <label id="stand-fov-label">
                 Zoom
@@ -424,7 +433,10 @@
         let customStands = [];
         let presetStands = [];
         let placeStandActive = false;
+        let placePointer = null;
         let grandstandFov = 55;
+        const PLACE_TAP_PX = 5;
+        const PLACE_TAP_MS = 300;
         let lastFrameMs = 0;
         let initialCameraApplied = false;
         const raycaster = new THREE.Raycaster();
@@ -1666,12 +1678,16 @@
 
         function onPointerDown(e) {
             if (placeStandActive && cameraMode === 'grandstand') {
-                if (e.button !== undefined && e.button !== 0) return;
-                const g = groundAt(e.clientX, e.clientY);
-                if (!g) return;
-                e.preventDefault();
-                e.stopPropagation();
-                placeStandAt(g.x, g.y);
+                const primary = e.isPrimary !== false;
+                const left = e.button === undefined || e.button === 0;
+                if (primary && left) {
+                    placePointer = {
+                        x: e.clientX,
+                        y: e.clientY,
+                        t: performance.now(),
+                        id: e.pointerId,
+                    };
+                }
                 return;
             }
             if (cameraMode !== 'orbit') return;
@@ -1709,7 +1725,58 @@
             });
         }
 
+        function tryPlaceStandTap(e) {
+            if (!placePointer || e.pointerId !== placePointer.id) return false;
+            const start = placePointer;
+            placePointer = null;
+            const dx = e.clientX - start.x;
+            const dy = e.clientY - start.y;
+            const dt = performance.now() - start.t;
+            if (Math.hypot(dx, dy) >= PLACE_TAP_PX || dt >= PLACE_TAP_MS) return false;
+            const g = groundAt(e.clientX, e.clientY);
+            if (!g) return false;
+            return placeStandAt(g.x, g.y);
+        }
+
+        function syncPlaceStandControls() {
+            if (!controls) return;
+            const placing = placeStandActive && cameraMode === 'grandstand';
+            if (!placing) {
+                if (cameraMode === 'grandstand') controls.enabled = false;
+                return;
+            }
+            applyGrandstand(driveDistance);
+            const car = layoutPoints ? onboardStation(driveDistance) : null;
+            const ahead = layoutPoints ? onboardStation(driveDistance + 120) : null;
+            if (car && ahead) {
+                controls.target.set(
+                    car.sceneX * 0.65 + ahead.sceneX * 0.35,
+                    car.sceneY * 0.65 + ahead.sceneY * 0.35,
+                    car.sceneZ * 0.65 + ahead.sceneZ * 0.35,
+                );
+            } else if (car) {
+                controls.target.set(car.sceneX, car.sceneY, car.sceneZ);
+            }
+            controls.enabled = true;
+            controls.update();
+        }
+
+        function setPlaceStandActive(on) {
+            placeStandActive = !!on && cameraMode === 'grandstand' && customStands.length < 4;
+            placePointer = null;
+            if (placeStandActive) syncPlaceStandControls();
+            else if (controls && cameraMode === 'grandstand') {
+                controls.enabled = false;
+                applyGrandstand(driveDistance);
+            }
+            updateCameraModeUi();
+        }
+
         function onPointerUp(e) {
+            if (placeStandActive && cameraMode === 'grandstand') {
+                tryPlaceStandTap(e);
+                return;
+            }
             if (!dragging || (dragPointerId != null && e.pointerId !== dragPointerId)) return;
             const moved = dragMoved;
             const index = dragIndex;
@@ -1717,7 +1784,10 @@
             const after = workingPoints[index];
             dragging = false;
             dragPointerId = null;
-            if (controls) controls.enabled = cameraMode === 'orbit';
+            if (controls) {
+                controls.enabled = cameraMode === 'orbit'
+                    || (cameraMode === 'grandstand' && placeStandActive);
+            }
             if (moved) {
                 undoStack.push(dragBeforePoints);
                 if (undoStack.length > 50) undoStack.shift();
@@ -1730,6 +1800,13 @@
             }
             dragBeforePoints = null;
             updateEditButtons();
+        }
+
+        function onPointerCancel(e) {
+            if (placePointer && e.pointerId === placePointer.id) placePointer = null;
+            if (dragging && (dragPointerId == null || e.pointerId === dragPointerId)) {
+                onPointerUp(e);
+            }
         }
 
         function onDoubleClick(e) {
@@ -2291,9 +2368,11 @@
             const standBox = document.getElementById('stand-panel');
             if (standBox) standBox.style.display = cameraMode === 'grandstand' ? 'block' : 'none';
             if (cameraMode !== 'grandstand' && placeStandActive) {
-                placeStandActive = false;
+                setPlaceStandActive(false);
             }
             refreshStandUi();
+            const placeHint = document.getElementById('stand-place-hint');
+            if (placeHint) placeHint.style.display = placeStandActive ? 'block' : 'none';
             const help = document.getElementById('help');
             if (!help) return;
             if (cameraMode === 'orbit') {
@@ -2499,6 +2578,7 @@
             if (!driveStands[index]) return;
             grandstandIndex = index;
             if (cameraMode !== 'grandstand') setCameraMode('grandstand');
+            else if (placeStandActive) syncPlaceStandControls();
             else {
                 applyDriveCamera(null);
                 updateCameraModeUi();
@@ -2609,7 +2689,7 @@
             renderer.domElement.addEventListener('pointerdown', onPointerDown, true);
             window.addEventListener('pointermove', onPointerMove);
             window.addEventListener('pointerup', onPointerUp);
-            window.addEventListener('pointercancel', onPointerUp);
+            window.addEventListener('pointercancel', onPointerCancel);
             renderer.domElement.addEventListener('dblclick', onDoubleClick);
 
             world = new THREE.Group();
@@ -2744,6 +2824,14 @@
                     rebuildDriveStands();
                     if (cameraMode === 'grandstand') applyDriveCamera(null);
                 },
+                setPlaceStandActive,
+                isPlaceStandActive() {
+                    return placeStandActive;
+                },
+                cameraPosition() {
+                    if (!camera) return null;
+                    return { x: camera.position.x, y: camera.position.y, z: camera.position.z };
+                },
             };
 
             animate();
@@ -2814,6 +2902,11 @@
                     }
                     return;
                 }
+                if (e.key === 'Escape' && placeStandActive) {
+                    e.preventDefault();
+                    setPlaceStandActive(false);
+                    return;
+                }
                 if (!editMode || cameraMode !== 'orbit') return;
                 if (e.key === 'Delete' || e.key === 'Backspace') {
                     e.preventDefault();
@@ -2867,9 +2960,8 @@
             });
             document.getElementById('btn-place-stand').addEventListener('click', () => {
                 if (cameraMode !== 'grandstand') setCameraMode('grandstand');
-                if (customStands.length >= 4) return;
-                placeStandActive = !placeStandActive;
-                updateCameraModeUi();
+                if (customStands.length >= 4 && !placeStandActive) return;
+                setPlaceStandActive(!placeStandActive);
             });
             document.getElementById('btn-delete-stand').addEventListener('click', () => deleteSelectedStand());
             document.getElementById('stand-fov').addEventListener('input', (e) => {
@@ -2920,8 +3012,11 @@
                 }
             }
             updateCarMarker();
-            if (cameraMode === 'orbit') controls.update();
-            else applyDriveCamera(drivePlaying ? dt : null);
+            if (cameraMode === 'orbit' || (cameraMode === 'grandstand' && placeStandActive)) {
+                controls.update();
+            } else {
+                applyDriveCamera(drivePlaying ? dt : null);
+            }
             if (drivePlaying) syncDriveUi();
             updateHandleColors();
             sky.position.copy(camera.position);

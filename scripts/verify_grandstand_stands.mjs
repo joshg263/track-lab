@@ -180,5 +180,66 @@ await page.click('#btn-cam-grandstand');
 await page.waitForTimeout(500);
 await page.screenshot({ path: join(root, 'docs/grandstand_default_stands.png') });
 
+await openLayout('version-1');
+await page.click('#btn-cam-grandstand');
+await page.waitForFunction(() => window.__tracklab.isPlaceStandActive() === false);
+await page.click('#btn-place-stand');
+await page.waitForFunction(() => window.__tracklab.isPlaceStandActive() === true);
+await page.waitForTimeout(200);
+
+const placeDrag = await page.evaluate(() => {
+    const tl = window.__tracklab;
+    const before = {
+        count: tl.cameraState().customStands.length,
+        cam: tl.cameraPosition(),
+    };
+    return before;
+});
+
+const canvas = await page.$('#canvas-container canvas');
+const box = await canvas.boundingBox();
+const x0 = box.x + box.width * 0.55;
+const y0 = box.y + box.height * 0.5;
+await page.mouse.move(x0, y0);
+await page.mouse.down();
+await page.mouse.move(x0 + 120, y0 + 40, { steps: 8 });
+await page.waitForTimeout(80);
+await page.mouse.up();
+await page.waitForTimeout(200);
+
+const afterDrag = await page.evaluate((camBefore) => {
+    const tl = window.__tracklab;
+    const cam = tl.cameraPosition();
+    const shift = Math.hypot(cam.x - camBefore.x, cam.y - camBefore.y, cam.z - camBefore.z);
+    return {
+        count: tl.cameraState().customStands.length,
+        shift,
+    };
+}, placeDrag.cam);
+console.log('place drag', JSON.stringify(afterDrag));
+if (afterDrag.count !== placeDrag.count) {
+    throw new Error('drag in place mode added a stand');
+}
+if (!(afterDrag.shift > 2)) {
+    throw new Error('drag in place mode did not move the camera');
+}
+
+const beforeClick = await page.evaluate(() => window.__tracklab.cameraState().customStands.length);
+const x1 = box.x + box.width * 0.48;
+const y1 = box.y + box.height * 0.52;
+await page.mouse.move(x1, y1);
+await page.mouse.down();
+await page.mouse.up();
+await page.waitForTimeout(200);
+const afterClick = await page.evaluate(() => window.__tracklab.cameraState().customStands.length);
+console.log('place click counts', beforeClick, '->', afterClick);
+if (afterClick !== beforeClick + 1) {
+    throw new Error('click in place mode should add exactly one stand');
+}
+
+await page.keyboard.press('Escape');
+await page.waitForFunction(() => window.__tracklab.isPlaceStandActive() === false);
+console.log('place mode camera interaction check passed');
+
 await browser.close();
 console.log('grandstand stands check passed');
