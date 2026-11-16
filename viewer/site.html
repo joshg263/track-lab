@@ -2070,7 +2070,7 @@
                 + `${(driveDistance / 1000).toFixed(3)} / ${(lap / 1000).toFixed(3)} km · ${sign}${grad.toFixed(1)}%`;
             if (lapEl) {
                 lapEl.textContent = driveProfile
-                    ? `Lap estimate ${formatLapEstimate(driveProfile.lapTimeS)}`
+                    ? `Rough lap estimate ${formatLapEstimate(driveProfile.lapTimeS)}`
                     : '';
             }
             drawSpeedTrace();
