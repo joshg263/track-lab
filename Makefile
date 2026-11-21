@@ -165,7 +165,7 @@ site-scout-screenshots:
 # AI Direction Loop (Spike 5)
 # ============================================================
 
-.PHONY: layout-check layout-check-all layout-verify direction-loop-verify layout-math-verify
+.PHONY: layout-check layout-check-all layout-verify direction-loop-verify layout-math-verify vertical-profile-verify
 
 # Check a single layout
 # Usage: make layout-check LAYOUT=data/sites/nishiwaki_basin/layouts/layout_a.json
@@ -194,7 +194,14 @@ direction-loop-verify:
 	@echo "3. JS layout maths agrees with the Python checker..."
 	@$(PYTHON) scripts/verify_layout_math.py
 	@echo ""
+	@echo "4. Designed vertical profile agrees in Python and JS..."
+	@$(PYTHON) scripts/verify_vertical_profile.py
+	@echo ""
 	@echo "All direction loop checks passed!"
+
+# Designed profile, earthworks, and the JS port
+vertical-profile-verify:
+	@$(PYTHON) scripts/verify_vertical_profile.py
 
 # JS corner + gradient maths vs check_metrics.json and Red Bull Ring analysis
 layout-math-verify:

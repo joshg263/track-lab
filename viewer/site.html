@@ -59,7 +59,7 @@
         .site-info .value { color: #00ffcc; font-weight: bold; }
 
         #stats {
-            top: 20px; right: 20px; max-width: 260px;
+            top: 20px; right: 20px; max-width: 320px;
             max-height: calc(100vh - 40px); overflow: auto;
         }
         #stats h2 { margin-bottom: 10px; font-size: 16px; color: #4ecdc4; }
@@ -157,6 +157,19 @@
             width: 100%; height: 56px; margin-top: 6px; border-radius: 4px;
             background: #10141c; display: block;
         }
+        #profile-limits { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 8px; }
+        #profile-limits label { font-size: 11px; margin: 2px 0; }
+        #profile-limits input[type="number"] {
+            width: 64px; background: #333; color: #eee; border: 1px solid #555;
+            border-radius: 4px; padding: 3px 4px; font-family: monospace; font-size: 11px;
+        }
+        #profile-chart {
+            width: 100%; height: 88px; margin-top: 6px; border-radius: 4px;
+            background: #10141c; display: block;
+        }
+        #profile-legend { display: flex; gap: 10px; margin-top: 4px; font-size: 10px; color: #aaa; }
+        #profile-legend i { display: inline-block; width: 10px; height: 8px; margin-right: 3px; vertical-align: middle; }
+        #profile-note { font-size: 10px; color: #aaa; line-height: 1.35; margin-top: 4px; }
         #lap-estimate { font-size: 11px; color: #f9ca24; margin-top: 3px; font-family: monospace; }
         #car-settings { margin-top: 8px; }
         #car-settings .car-note { font-size: 10px; color: #999; line-height: 1.35; }
@@ -224,6 +237,22 @@
             </select>
         </label>
         <div id="layout-direction" class="layout-direction" style="display: none;"></div>
+
+        <h3>Vertical profile</h3>
+        <div id="profile-limits">
+            <label>Cut/fill <input id="cut-fill-cap" type="number" min="0.5" max="40" step="0.5" value="6"> m</label>
+            <label>Max grade <input id="grade-cap" type="number" value="12" disabled> %</label>
+            <label>Crest R <input id="crest-radius" type="number" min="50" max="20000" step="50" value="1000"> m</label>
+            <label>Dip R <input id="dip-radius" type="number" min="50" max="20000" step="50" value="600"> m</label>
+        </div>
+        <canvas id="profile-chart" width="300" height="88"></canvas>
+        <div id="profile-legend">
+            <span><i style="background:#9aa4b2"></i>raw</span>
+            <span><i style="background:#7dffb3"></i>design</span>
+            <span><i style="background:#e07a3d"></i>cut</span>
+            <span><i style="background:#3d8bff"></i>fill</span>
+        </div>
+        <div id="profile-note"></div>
 
         <h3>📷 Camera</h3>
         <div id="camera-modes">
@@ -307,6 +336,7 @@
             <input type="range" id="exaggeration" min="1" max="5" step="0.5" value="1.5">
             <span id="exag-value">1.5×</span>
         </label>
+        <label><input type="checkbox" id="designed-profile" checked> Designed road height</label>
         <label><input type="checkbox" id="show-layout" checked> Show layout ribbon</label>
         <label><input type="checkbox" id="show-racing-line" checked> Racing line</label>
         <label><input type="checkbox" id="show-labels" checked> Show corner labels</label>
@@ -348,7 +378,14 @@
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
         import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
         import { Sky } from 'three/addons/objects/Sky.js';
-        import { analyzeLayout, makeDemSampler } from './layout_math.js';
+        import {
+            analyzeLayout,
+            gradeProfile,
+            makeDemSampler,
+            maxAbsGradientPct,
+            meanSampleSpacing,
+        } from './layout_math.js';
+        import { MAX_CATCH_M, buildVerticalProfile } from './vertical_profile.js';
         import {
             advanceDistance,
             buildDriveProfile,
@@ -360,10 +397,14 @@
         import { Terrain, computeViewshed } from './viewshed.js';
 
         const params = new URLSearchParams(location.search);
+        if (params.get('profile') === 'terrain') {
+            const designedBox = document.getElementById('designed-profile');
+            if (designedBox) designedBox.checked = false;
+        }
         const SITES_BASE = 'data/sites';
 
         let scene, camera, renderer, labelRenderer, controls, world, sky, sun;
-        let terrainMesh, viewpointMarker, trackGroup;
+        let terrainMesh, coarseMesh, earthMesh, coarseIndex, viewpointMarker, trackGroup;
         let terrain, terrainMeta, sceneData;
         let frame = { lon0: 0, lat0: 0, sx: 111320, sy: 111320 };
         let baseElevation = 0;
@@ -398,6 +439,10 @@
         let sessionNotes = [];
         let handleGroup = null;
         let sampleZ = () => 0;
+        let verticalProfile = null;
+        const MESH_SIDE_SLOPE = 0.5;
+        const SHOULDER_M = 3;
+        const EARTH_STEP_M = 4;
         let cameraMode = 'orbit';
         let grandstandIndex = 0;
         let driveDistance = 0;
@@ -418,6 +463,7 @@
         const _rayOrigin = new THREE.Vector3();
         const _down = new THREE.Vector3(0, -1, 0);
         const EYE_HEIGHT_M = 1.1;
+        const CAR_CENTRE_M = 0.525;
         const STAND_EYE_M = 1.7;
         const NOMINAL_SPEED_MPS = 120 / 3.6;
         const ONBOARD_FOV = 70;
@@ -587,6 +633,7 @@
                     heights, rows: terrainMeta.rows, cols: terrainMeta.cols,
                     left: terrainMeta.left, top: terrainMeta.top,
                     resX: terrainMeta.res_x, resY: terrainMeta.res_y,
+                    displayHeights: new Float32Array(heights),
                 };
                 viewshedTerrain = new Terrain({
                     rows: terrain.rows, cols: terrain.cols,
@@ -699,6 +746,7 @@
             currentLayoutKey = null;
             layoutPoints = null;
             liveMetrics = null;
+            verticalProfile = null;
             driveProfile = null;
             originalPoints = null;
             workingPoints = null;
@@ -714,6 +762,8 @@
             
             document.getElementById('layout-stats').style.display = 'none';
             document.getElementById('layout-direction').style.display = 'none';
+            blendEarthworksIntoHeights();
+            drawProfileChart();
             updateEditButtons();
             renderNotes();
             onLayoutPathChanged();
@@ -770,19 +820,30 @@
                 
                 const centerZ = p.z;
                 const localY = (elev) => elev - baseElevation;
+                const designed = designEnabled() && verticalProfile;
                 
-                const edge = (w, drop) => {
+                const edge = (w, drop, onDeck) => {
                     const lx = p.x + nx * w, ly = p.y + ny * w;
                     const rx = p.x - nx * w, ry = p.y - ny * w;
-                    // Drive views sit on the rendered triangles. The overview ribbon
-                    // keeps the bilinear sample the checker uses, lifted clear of the mesh.
-                    const lz = eye ? meshElevation(lx, ly) : Math.max(sampleTerrain(lx, ly), centerZ);
-                    const rz = eye ? meshElevation(rx, ry) : Math.max(sampleTerrain(rx, ry), centerZ);
+                    // Deck and the 2 m outline sit inside the shoulder, so both
+                    // stay on the designed centreline instead of the raw DEM.
+                    let lz;
+                    let rz;
+                    if (designed) {
+                        lz = centerZ;
+                        rz = centerZ;
+                    } else if (eye) {
+                        lz = meshElevation(lx, ly);
+                        rz = meshElevation(rx, ry);
+                    } else {
+                        lz = Math.max(sampleTerrain(lx, ly), centerZ);
+                        rz = Math.max(sampleTerrain(rx, ry), centerZ);
+                    }
                     return [lx, localY(lz) + lift - drop, -ly, rx, localY(rz) + lift - drop, -ry];
                 };
                 
-                outlineVerts.push(...edge(outlineWidth, outlineDrop));
-                trackVerts.push(...edge(halfWidth, 0));
+                outlineVerts.push(...edge(outlineWidth, outlineDrop, false));
+                trackVerts.push(...edge(halfWidth, 0, true));
             }
             
             const indices = [];
@@ -844,10 +905,13 @@
                 driveProfile = null;
                 return;
             }
+            const designed = designEnabled() && verticalProfile;
             driveProfile = buildDriveProfile(layoutPoints, {
                 lapLengthM: liveMetrics.lapLengthM,
                 trackWidthM: trackWidthM(),
-                sampleZ,
+                // Designed gradient uses centreline z(s). The deck is flat, so the
+                // racing line is at that height rather than a mesh sample.
+                sampleZ: designed ? null : sampleZ,
                 ...readCarInputs(),
             });
         }
@@ -868,8 +932,11 @@
                 const len = Math.hypot(dx, dy) || 1;
                 const nx = -dy / len;
                 const ny = dx / len;
+                const designed = designEnabled() && verticalProfile;
                 const place = (x, y) => {
-                    const z = eye ? meshElevation(x, y) : Math.max(sampleTerrain(x, y), p.z);
+                    const z = designed
+                        ? p.z
+                        : (eye ? meshElevation(x, y) : Math.max(sampleTerrain(x, y), p.z));
                     return [x, z - baseElevation + lift + 0.28, -y];
                 };
                 verts.push(...place(p.x + nx * half, p.y + ny * half));
@@ -909,7 +976,7 @@
             const dy = p1.y - p0.y;
             const eye = driveView();
             const lift = eye ? 0.35 : RIBBON_OFFSET;
-            const surface = eye ? meshElevation(p0.x, p0.y) : p0.z;
+            const surface = (designEnabled() && verticalProfile) || !eye ? p0.z : meshElevation(p0.x, p0.y);
             const y = surface - baseElevation + lift + (eye ? 0.15 : 0.5);
             
             const geometry = new THREE.PlaneGeometry(trackWidthM() + 4, 3);
@@ -982,11 +1049,20 @@
             const numCorners = liveMetrics.numCorners;
             const minRadius = liveMetrics.minRadiusM;
             const maxGrad = liveMetrics.maxGradientPct;
-            const elevs = layoutPoints.map(p => p.z);
+            const designGrad = liveMetrics.designGradientPct;
+            const elevs = layoutPoints.map(p => p.terrainZ ?? p.z);
             const elevRange = Math.max(...elevs) - Math.min(...elevs);
             const viewshedText = liveViewshedPct == null
                 ? '…'
                 : `${liveViewshedPct.toFixed(1)}%${viewshedPending ? ' (on release)' : ''}`;
+            const limits = profileLimits();
+            const crestT = verticalProfile?.terrain.min_crest_radius_m;
+            const crestD = verticalProfile?.design.min_crest_radius_m;
+            const dipT = verticalProfile?.terrain.min_dip_radius_m;
+            const dipD = verticalProfile?.design.min_dip_radius_m;
+            const works = verticalProfile?.earthworks;
+            const fmtR = (v) => (v == null ? '—' : `${Math.round(v)} m`);
+            const pair = (terrainText, designText) => `terrain ${terrainText} · design ${designText}`;
 
             const checks = [
                 { id: 'lap', name: 'Lap length', value: `${(lapLength / 1000).toFixed(3)} km`,
@@ -994,8 +1070,26 @@
                 { id: 'radius', name: 'Min radius', value: minRadius != null ? `${Number(minRadius).toFixed(1)} m` : '—',
                   pass: minRadius != null && minRadius >= 15, target: '≥15 m' },
                 { id: 'corners', name: 'Corners', value: numCorners != null ? String(numCorners) : '—', pass: true, target: 'info' },
-                { id: 'gradient', name: 'Max gradient', value: maxGrad != null ? `${maxGrad.toFixed(1)}%` : '—',
-                  pass: maxGrad != null && maxGrad <= 12, target: '≤12%' },
+                { id: 'gradient', name: 'Max gradient',
+                  value: designGrad != null ? pair(`${maxGrad.toFixed(1)}%`, `${designGrad.toFixed(1)}%`) : `${maxGrad.toFixed(1)}%`,
+                  pass: (designGrad ?? maxGrad) != null && (designGrad ?? maxGrad) <= 12, target: '≤12%' },
+                { id: 'crest', name: 'Crest radius',
+                  value: verticalProfile ? pair(fmtR(crestT), fmtR(crestD)) : '—',
+                  pass: crestD == null || crestD >= limits.minCrestRadiusM,
+                  target: `≥${limits.minCrestRadiusM.toFixed(0)} m` },
+                { id: 'dip', name: 'Dip radius',
+                  value: verticalProfile ? pair(fmtR(dipT), fmtR(dipD)) : '—',
+                  pass: dipD == null || dipD >= limits.minDipRadiusM,
+                  target: `≥${limits.minDipRadiusM.toFixed(0)} m` },
+                { id: 'earth', name: 'Cut / fill',
+                  value: works
+                    ? `${works.max_cut_m.toFixed(1)} / ${works.max_fill_m.toFixed(1)} m`
+                    : '—',
+                  pass: !works || Math.max(works.max_cut_m, works.max_fill_m) <= limits.maxCutFillM + 0.005,
+                  target: `≤${limits.maxCutFillM.toFixed(0)} m` },
+                { id: 'volume', name: 'Volumes',
+                  value: works ? `${Math.round(works.cut_m3)} / ${Math.round(works.fill_m3)} m³` : '—',
+                  pass: true, target: 'info' },
                 { id: 'viewshed', name: 'Visible lap', value: viewshedText, pass: true, target: 'info' },
                 { id: 'elev', name: 'Elev range', value: `${elevRange.toFixed(0)} m`,
                   pass: true, target: 'info' },
@@ -1011,26 +1105,43 @@
             document.getElementById('layout-stats').style.display = 'block';
         }
 
+        function disposeTerrainObject(root) {
+            if (!root) return;
+            root.traverse(obj => {
+                if (obj.geometry) obj.geometry.dispose();
+                const materials = obj.material ? [].concat(obj.material) : [];
+                for (const mat of materials) mat.dispose();
+            });
+        }
+
         function rebuildTerrain(imagery) {
             if (terrainMesh) {
                 world.remove(terrainMesh);
-                terrainMesh.geometry.dispose();
-                terrainMesh.material.dispose();
+                disposeTerrainObject(terrainMesh);
             }
-            
-            const { rows, cols, left, top, resX, resY, heights } = terrain;
+            if (earthMesh && !earthMesh.parent) {
+                earthMesh.geometry?.dispose();
+                earthMesh.material?.dispose();
+            }
+            coarseMesh = null;
+            earthMesh = null;
+            coarseIndex = null;
+            terrainMesh = null;
+
+            ensureDisplayHeights();
+            const { rows, cols, left, top, resX, resY, displayHeights } = terrain;
             const [iw, is, ie, inn] = sceneData.imagery.bbox;
-            
+
             const positions = new Float32Array(rows * cols * 3);
             const uvs = new Float32Array(rows * cols * 2);
-            
+
             for (let i = 0; i < rows; i++) {
                 const lat = top - (i + 0.5) * resY;
                 for (let j = 0; j < cols; j++) {
                     const lon = left + (j + 0.5) * resX;
                     const k = i * cols + j;
                     const x = (lon - frame.lon0) * frame.sx;
-                    const y = heights[k] - baseElevation;
+                    const y = displayHeights[k] - baseElevation;
                     const z = -(lat - frame.lat0) * frame.sy;
                     positions[k * 3] = x;
                     positions[k * 3 + 1] = y;
@@ -1039,7 +1150,7 @@
                     uvs[k * 2 + 1] = (lat - is) / (inn - is);
                 }
             }
-            
+
             const indices = [];
             for (let i = 0; i < rows - 1; i++) {
                 for (let j = 0; j < cols - 1; j++) {
@@ -1047,21 +1158,42 @@
                     indices.push(a, b, c, b, d, c);
                 }
             }
-            
+            coarseIndex = indices;
+
             const geometry = new THREE.BufferGeometry();
             geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
             geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-            geometry.setIndex(indices);
+            geometry.setIndex(indices.slice());
             geometry.computeVertexNormals();
 
             imagery.colorSpace = THREE.SRGBColorSpace;
             imagery.anisotropy = renderer.capabilities.getMaxAnisotropy();
-            
+
             const material = new THREE.MeshLambertMaterial({ map: imagery, color: 0xffffff });
-            terrainMesh = new THREE.Mesh(geometry, material);
-            terrainMesh.receiveShadow = true;
+            coarseMesh = new THREE.Mesh(geometry, material);
+            coarseMesh.receiveShadow = true;
+            coarseMesh.name = 'terrain-dem';
+
+            earthMesh = new THREE.Mesh(
+                new THREE.BufferGeometry(),
+                new THREE.MeshLambertMaterial({
+                    color: 0xffffff,
+                    vertexColors: true,
+                    side: THREE.DoubleSide,
+                    polygonOffset: true,
+                    polygonOffsetFactor: -2,
+                    polygonOffsetUnits: -2,
+                }),
+            );
+            earthMesh.receiveShadow = true;
+            earthMesh.name = 'earthworks';
+            earthMesh.visible = false;
+
+            terrainMesh = new THREE.Group();
+            terrainMesh.name = 'terrain';
+            terrainMesh.add(coarseMesh);
             world.add(terrainMesh);
-            
+
             renderer.shadowMap.needsUpdate = true;
         }
 
@@ -1314,14 +1446,735 @@
             URL.revokeObjectURL(a.href);
         }
 
+        function designEnabled() {
+            const box = document.getElementById('designed-profile');
+            return !box || box.checked;
+        }
+
+        function profileLimits() {
+            const num = (id, fallback) => {
+                const v = parseFloat(document.getElementById(id)?.value);
+                return Number.isFinite(v) && v > 0 ? v : fallback;
+            };
+            return {
+                maxGrade: 0.12,
+                maxCutFillM: num('cut-fill-cap', 6),
+                minCrestRadiusM: num('crest-radius', 1000),
+                minDipRadiusM: num('dip-radius', 600),
+            };
+        }
+
+        function fitVerticalProfile() {
+            verticalProfile = null;
+            if (!layoutPoints || layoutPoints.length < 8 || !liveMetrics) return;
+            const limits = profileLimits();
+            verticalProfile = buildVerticalProfile(
+                layoutPoints.map((p) => p.x),
+                layoutPoints.map((p) => p.y),
+                layoutPoints.map((p) => p.distance),
+                layoutPoints.map((p) => p.terrainZ),
+                liveMetrics.lapLengthM,
+                trackWidthM(),
+                sampleZ,
+                limits,
+            );
+            const spacing = meanSampleSpacing(
+                layoutPoints.map((p) => p.distance),
+                liveMetrics.lapLengthM,
+            );
+            const graded = gradeProfile(
+                layoutPoints.map((p) => p.distance),
+                verticalProfile.design_at_points,
+                spacing,
+                { closedTotalLength: liveMetrics.lapLengthM },
+            );
+            liveMetrics.designGradientPct = maxAbsGradientPct(graded.gradients);
+        }
+
+        function ensureDisplayHeights() {
+            if (!terrain) return;
+            if (!terrain.displayHeights || terrain.displayHeights.length !== terrain.heights.length) {
+                terrain.displayHeights = new Float32Array(terrain.heights);
+            }
+        }
+
+        function sectionBuckets(sections) {
+            const cell = 40;
+            const buckets = new Map();
+            for (let i = 0; i < sections.length; i++) {
+                const s = sections[i];
+                const key = `${Math.floor(s.x / cell)}:${Math.floor(s.y / cell)}`;
+                let list = buckets.get(key);
+                if (!list) {
+                    list = [];
+                    buckets.set(key, list);
+                }
+                list.push(i);
+            }
+            return { cell, buckets };
+        }
+
+        function nearestSection(x, y, sections, index, radiusM) {
+            const { cell, buckets } = index;
+            const ix = Math.floor(x / cell);
+            const iy = Math.floor(y / cell);
+            const radius = radiusM > 0 ? radiusM : 120;
+            const span = Math.max(1, Math.ceil(radius / cell));
+            let best = -1;
+            let bestD = radius * radius;
+            for (let dx = -span; dx <= span; dx++) {
+                for (let dy = -span; dy <= span; dy++) {
+                    const list = buckets.get(`${ix + dx}:${iy + dy}`);
+                    if (!list) continue;
+                    for (const i of list) {
+                        const s = sections[i];
+                        const d = (s.x - x) * (s.x - x) + (s.y - y) * (s.y - y);
+                        if (d < bestD) {
+                            bestD = d;
+                            best = i;
+                        }
+                    }
+                }
+            }
+            return best;
+        }
+
+        function demCellDiagonalM() {
+            if (!terrain || !frame.sx) return 40;
+            return Math.hypot(terrain.resX * frame.sx, terrain.resY * frame.sy);
+        }
+
+        function earthLaterals(edge, outer) {
+            const laterals = [];
+            const add = (v) => {
+                if (!laterals.length || Math.abs(laterals[laterals.length - 1] - v) > 0.2) laterals.push(v);
+            };
+            // The carriageway is more than one triangle. A single span from
+            // the centreline to the shoulder folds across a hairpin and
+            // paints the entry elevation over the road after the corner.
+            const deckStep = 1;
+            add(-outer);
+            for (let s = outer - EARTH_STEP_M; s > edge; s -= EARTH_STEP_M) add(-s);
+            add(-edge);
+            for (let s = edge - deckStep; s > deckStep * 0.5; s -= deckStep) add(-s);
+            add(0);
+            for (let s = deckStep; s < edge - 0.2; s += deckStep) add(s);
+            add(edge);
+            for (let s = edge + EARTH_STEP_M; s < outer; s += EARTH_STEP_M) add(s);
+            add(outer);
+            return laterals;
+        }
+
+        // Display height only. Volumes still integrate 1:2 from the pavement
+        // edge; this holds the design grade across the shoulder, then the same
+        // 1:2 until it meets the original surface or the 80 m catch.
+        function earthSample(section, lateral) {
+            const edge = section.half_m + SHOULDER_M;
+            // One sample past the shoulder stays on the design grade so a
+            // triangle cannot fold the 1:2 face back over the carriageway.
+            const flat = edge + EARTH_STEP_M;
+            const ad = Math.abs(lateral);
+            const x = section.x + section.nx * lateral;
+            const y = section.y + section.ny * lateral;
+            const ground = meshElevation(x, y);
+            if (ad <= flat + 1e-6) return { x, y, z: section.z_design, ground };
+            const info = lateral >= 0 ? section.left : section.right;
+            const fromShoulder = ad - flat;
+            let z = ground;
+            if (info.slope_sign !== 0 && fromShoulder <= MAX_CATCH_M + 1e-6) {
+                const slopeZ = section.z_design + info.slope_sign * fromShoulder * MESH_SIDE_SLOPE;
+                const crossed = info.slope_sign > 0
+                    ? slopeZ >= ground - 1e-6
+                    : slopeZ <= ground + 1e-6;
+                z = crossed ? ground : slopeZ;
+            }
+            return { x, y, z, ground };
+        }
+
+        function sectionOwns(section, x, y, sections, buckets, radiusM) {
+            const j = nearestSection(x, y, sections, buckets, radiusM);
+            if (j < 0) return true;
+            const other = sections[j];
+            const ds = Math.hypot(x - section.x, y - section.y);
+            const dn = Math.hypot(x - other.x, y - other.y);
+            return ds <= dn + 2;
+        }
+
+        function loopDistance(i, j, n) {
+            const d = Math.abs(i - j);
+            return Math.min(d, n - d);
+        }
+
+        function sectionLateral(section, x, y) {
+            return (x - section.x) * section.nx + (y - section.y) * section.ny;
+        }
+
+        function sectionAlong(section, x, y) {
+            return (x - section.x) * section.ny - (y - section.y) * section.nx;
+        }
+
+        function barySample(a, b, c, u, v) {
+            const w = 1 - u - v;
+            return {
+                x: a.x * w + b.x * u + c.x * v,
+                y: a.y * w + b.y * u + c.y * v,
+                z: a.z * w + b.z * u + c.z * v,
+            };
+        }
+
+        function pointInCorridor(section, x, y, alongM) {
+            const lat = Math.abs(sectionLateral(section, x, y));
+            const along = Math.abs(sectionAlong(section, x, y));
+            return lat <= section.half_m + SHOULDER_M + 0.4 && along <= alongM;
+        }
+
+        // Drop a face that would draw above some other part of the carriageway.
+        // Touching the corridor at the same grade is kept, so the shoulder
+        // still closes the gap beside the road.
+        function carriagewayTriangle(station, a, b, c, sections) {
+            const i2 = (station + 1) % sections.length;
+            const near = (section, p, edge) => (
+                Math.abs(sectionLateral(section, p.x, p.y)) <= edge
+                && Math.abs(sectionAlong(section, p.x, p.y)) <= 10
+            );
+            const edge = sections[station].half_m + SHOULDER_M + 0.75;
+            const next = sections[i2].half_m + SHOULDER_M + 0.75;
+            return [a, b, c].every((p) => near(sections[station], p, edge) || near(sections[i2], p, next));
+        }
+
+        function sampleBuriesRoad(station, p, sections, index) {
+            const n = sections.length;
+            const i2 = (station + 1) % n;
+            const cap = Math.max(sections[station].z_design, sections[i2].z_design) + 0.15;
+            const j = nearestSection(p.x, p.y, sections, index, 36);
+            if (j < 0) return false;
+            const dist = loopDistance(station, j, n);
+            if (dist <= 1) {
+                const here = pointInCorridor(sections[station], p.x, p.y, 8)
+                    || pointInCorridor(sections[i2], p.x, p.y, 8);
+                return here && p.z > cap;
+            }
+            const section = sections[j];
+            return pointInCorridor(section, p.x, p.y, 6) && p.z > section.z_design + 0.12;
+        }
+
+        function triangleHeightAt(a, b, c, x, y, minDen = 1e-3) {
+            const v0x = b.x - a.x;
+            const v0y = b.y - a.y;
+            const v1x = c.x - a.x;
+            const v1y = c.y - a.y;
+            const den = v0x * v1y - v0y * v1x;
+            if (Math.abs(den) < minDen) return null;
+            const v2x = x - a.x;
+            const v2y = y - a.y;
+            const u = (v2x * v1y - v2y * v1x) / den;
+            const v = (v0x * v2y - v0y * v2x) / den;
+            if (u < -1e-3 || v < -1e-3 || u + v > 1 + 1e-3) return null;
+            return a.z + u * (b.z - a.z) + v * (c.z - a.z);
+        }
+
+        // Any face that covers a later part of the lap above that part's
+        // design grade is dropped. The next station is the face's own edge,
+        // so it is not treated as foreign.
+        function longFaceCoversRoad(station, a, b, c, sections, index) {
+            const n = sections.length;
+            const minX = Math.min(a.x, b.x, c.x);
+            const maxX = Math.max(a.x, b.x, c.x);
+            const minY = Math.min(a.y, b.y, c.y);
+            const maxY = Math.max(a.y, b.y, c.y);
+            const { cell, buckets } = index;
+            const i0 = Math.floor((minX - 12) / cell);
+            const i1 = Math.floor((maxX + 12) / cell);
+            const j0 = Math.floor((minY - 12) / cell);
+            const j1 = Math.floor((maxY + 12) / cell);
+            const seen = new Set();
+            for (let ix = i0; ix <= i1; ix++) {
+                for (let iy = j0; iy <= j1; iy++) {
+                    const list = buckets.get(`${ix}:${iy}`);
+                    if (!list) continue;
+                    for (const s of list) {
+                        if (seen.has(s)) continue;
+                        seen.add(s);
+                        const section = sections[s];
+                        const nxt = sections[(s + 1) % n];
+                        const edge = section.half_m + SHOULDER_M;
+                        const laterals = [0, section.half_m, -section.half_m, edge - 1, 1 - edge];
+                        // The surface at the sample is what the camera sees.
+                        // A sliver with one low far vertex still interpolates
+                        // above the road next to its high edge. A deck that
+                        // follows the design stays within the tolerance, even
+                        // on a grade, because the sample limit is the design.
+                        const coversAbove = (x, y, limit) => {
+                            const h = triangleHeightAt(a, b, c, x, y);
+                            return h != null && h > limit;
+                        };
+                        for (const lat of laterals) {
+                            const x = section.x + section.nx * lat;
+                            const y = section.y + section.ny * lat;
+                            const limit = section.z_design + 0.12;
+                            if (coversAbove(x, y, limit)) return true;
+                            const mx = (x + nxt.x + nxt.nx * lat) / 2;
+                            const my = (y + nxt.y + nxt.ny * lat) / 2;
+                            const midLimit = (section.z_design + nxt.z_design) / 2 + 0.12;
+                            if (coversAbove(mx, my, midLimit)) return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+
+        // The carriageway is judged at its centroid, so a corner that merely
+        // reaches the next hairpin does not delete the deck. Slope and step
+        // faces are dropped when a sample sits above another part of the road.
+        function triangleBuriesRoad(station, a, b, c, sections, index) {
+            const samples = [barySample(a, b, c, 1 / 3, 1 / 3)];
+            if (!carriagewayTriangle(station, a, b, c, sections)) {
+                for (let u = 0; u <= 4; u++) {
+                    for (let v = 0; v <= 4 - u; v++) samples.push(barySample(a, b, c, u / 4, v / 4));
+                }
+            }
+            for (const p of samples) {
+                if (sampleBuriesRoad(station, p, sections, index)) return true;
+            }
+            return longFaceCoversRoad(station, a, b, c, sections, index);
+        }
+
+        function keepEarthVertex(section, lateral, sample, sections, buckets, searchR, diag) {
+            if (Math.abs(lateral) <= section.half_m + SHOULDER_M + 1e-6) return true;
+            const band = section.half_m + SHOULDER_M + 2 * diag + EARTH_STEP_M;
+            const j = nearestSection(sample.x, sample.y, sections, buckets, searchR);
+            if (j >= 0) {
+                const other = sections[j];
+                if (other !== section) {
+                    const lat = Math.abs((sample.x - other.x) * other.nx + (sample.y - other.y) * other.ny);
+                    if (lat <= other.half_m + SHOULDER_M) return false;
+                }
+            }
+            if (Math.abs(lateral) <= band) return true;
+            return sectionOwns(section, sample.x, sample.y, sections, buckets, searchR);
+        }
+
+        function layoutUv(x, y) {
+            const [iw, is, ie, inn] = sceneData.imagery.bbox;
+            const lon = frame.lon0 + x / frame.sx;
+            const lat = frame.lat0 + y / frame.sy;
+            return [(lon - iw) / (ie - iw), (lat - is) / (inn - is)];
+        }
+
+        function earthTint(z, ground, colors, offset) {
+            const cut = ground - z;
+            let r = 1;
+            let g = 1;
+            let b = 1;
+            if (cut > 0.2) {
+                r = 0.95; g = 0.52; b = 0.24;
+            } else if (cut < -0.2) {
+                r = 0.58; g = 0.64; b = 0.68;
+            }
+            colors[offset] = r;
+            colors[offset + 1] = g;
+            colors[offset + 2] = b;
+        }
+
+        function clearEarthMesh() {
+            if (!earthMesh) return;
+            earthMesh.removeFromParent();
+            earthMesh.geometry.dispose();
+            earthMesh.geometry = new THREE.BufferGeometry();
+            earthMesh.visible = false;
+        }
+
+        function restoreCoarseIndex() {
+            if (!coarseMesh || !coarseIndex) return;
+            coarseMesh.geometry.setIndex(coarseIndex.slice());
+            coarseMesh.geometry.computeVertexNormals();
+        }
+
+        function fillCorridorHoles(positions, uvs, colors, indices, sections, index) {
+            const lowestDesign = (x, y, fallback) => {
+                let z = fallback;
+                const { cell: sc, buckets } = index;
+                const ix = Math.floor(x / sc);
+                const iy = Math.floor(y / sc);
+                for (let dx = -1; dx <= 1; dx++) {
+                    for (let dy = -1; dy <= 1; dy++) {
+                        const list = buckets.get(`${ix + dx}:${iy + dy}`);
+                        if (!list) continue;
+                        for (const s of list) {
+                            const section = sections[s];
+                            if (!pointInCorridor(section, x, y, 8)) continue;
+                            if (section.z_design < z) z = section.z_design;
+                        }
+                    }
+                }
+                return z;
+            };
+            const extraP = [];
+            const extraU = [];
+            const extraC = [];
+            const tint = new Float32Array(3);
+            const n = sections.length;
+            const base = positions.length / 3;
+            const place = (i, x, y, zRoad) => {
+                const s = sections[i];
+                const tx = s.ny;
+                const ty = -s.nx;
+                const span = 0.55;
+                let z = lowestDesign(x, y, zRoad);
+                const shift = [
+                    [-tx, -ty], [tx, ty], [-s.nx, -s.ny], [s.nx, s.ny],
+                ];
+                for (const [dx, dy] of shift) z = lowestDesign(x + dx * span, y + dy * span, z);
+                const corners = [
+                    { x: x - tx * span - s.nx * span, y: y - ty * span - s.ny * span, z },
+                    { x: x - tx * span + s.nx * span, y: y - ty * span + s.ny * span, z },
+                    { x: x + tx * span + s.nx * span, y: y + ty * span + s.ny * span, z },
+                    { x: x + tx * span - s.nx * span, y: y + ty * span - s.ny * span, z },
+                ];
+                const start = base + extraP.length / 3;
+                for (const p of corners) {
+                    extraP.push(p.x, p.z - baseElevation, -p.y);
+                    const uv = layoutUv(p.x, p.y);
+                    extraU.push(uv[0], uv[1]);
+                    earthTint(p.z, meshElevation(p.x, p.y), tint, 0);
+                    extraC.push(tint[0], tint[1], tint[2]);
+                }
+                indices.push(start, start + 3, start + 1, start + 1, start + 3, start + 2);
+            };
+            for (let i = 0; i < n; i++) {
+                const s = sections[i];
+                const nxt = sections[(i + 1) % n];
+                const edge = s.half_m + SHOULDER_M;
+                for (const lat of [-edge + 1, -s.half_m, 0, s.half_m, edge - 1]) {
+                    place(i, s.x + s.nx * lat, s.y + s.ny * lat, s.z_design);
+                    place(
+                        i,
+                        (s.x + s.nx * lat + nxt.x + nxt.nx * lat) / 2,
+                        (s.y + s.ny * lat + nxt.y + nxt.ny * lat) / 2,
+                        (s.z_design + nxt.z_design) / 2,
+                    );
+                }
+            }
+            if (!extraP.length) return { positions, uvs, colors };
+            const nextP = new Float32Array(positions.length + extraP.length);
+            nextP.set(positions);
+            nextP.set(extraP, positions.length);
+            const nextU = new Float32Array(uvs.length + extraU.length);
+            nextU.set(uvs);
+            nextU.set(extraU, uvs.length);
+            const nextC = new Float32Array(colors.length + extraC.length);
+            nextC.set(colors);
+            nextC.set(extraC, colors.length);
+            return { positions: nextP, uvs: nextU, colors: nextC };
+        }
+
+        function buildEarthworksMesh(sections) {
+            const n = sections.length;
+            const edge = sections[0].half_m + SHOULDER_M;
+            const diag = demCellDiagonalM();
+            const outer = edge + MAX_CATCH_M + diag + EARTH_STEP_M;
+            const laterals = earthLaterals(edge, outer);
+            const nL = laterals.length;
+            const buckets = sectionBuckets(sections);
+            const searchR = outer + 40;
+            const maxExtent = new Float64Array(n);
+            const grid = new Array(n);
+
+            for (let i = 0; i < n; i++) {
+                const section = sections[i];
+                const row = new Array(nL);
+                let lastLeft = null;
+                let lastRight = null;
+                const centre = laterals.indexOf(0);
+                for (let j = centre; j >= 0; j--) {
+                    const sample = earthSample(section, laterals[j]);
+                    if (keepEarthVertex(section, laterals[j], sample, sections, buckets, searchR, diag)) {
+                        row[j] = sample;
+                        lastLeft = sample;
+                        if (Math.abs(laterals[j]) > maxExtent[i]) maxExtent[i] = Math.abs(laterals[j]);
+                    } else {
+                        row[j] = lastLeft || sample;
+                    }
+                }
+                for (let j = centre + 1; j < nL; j++) {
+                    const sample = earthSample(section, laterals[j]);
+                    if (keepEarthVertex(section, laterals[j], sample, sections, buckets, searchR, diag)) {
+                        row[j] = sample;
+                        lastRight = sample;
+                        if (laterals[j] > maxExtent[i]) maxExtent[i] = laterals[j];
+                    } else {
+                        row[j] = lastRight || sample;
+                    }
+                }
+                grid[i] = row;
+            }
+
+            let positions = new Float32Array(n * nL * 3);
+            let uvs = new Float32Array(n * nL * 2);
+            let colors = new Float32Array(n * nL * 3);
+            for (let i = 0; i < n; i++) {
+                for (let j = 0; j < nL; j++) {
+                    const p = grid[i][j];
+                    const k = i * nL + j;
+                    positions[k * 3] = p.x;
+                    positions[k * 3 + 1] = p.z - baseElevation;
+                    positions[k * 3 + 2] = -p.y;
+                    const uv = layoutUv(p.x, p.y);
+                    uvs[k * 2] = uv[0];
+                    uvs[k * 2 + 1] = uv[1];
+                    earthTint(p.z, p.ground, colors, k * 3);
+                }
+            }
+
+            const indices = [];
+            const same = (a, b) => Math.hypot(a.x - b.x, a.y - b.y) < 0.05;
+            for (let i = 0; i < n; i++) {
+                const i2 = (i + 1) % n;
+                if (Math.hypot(sections[i2].x - sections[i].x, sections[i2].y - sections[i].y) < 0.05) continue;
+                for (let j = 0; j < nL - 1; j++) {
+                    const p00 = grid[i][j];
+                    const p01 = grid[i][j + 1];
+                    const p10 = grid[i2][j];
+                    const p11 = grid[i2][j + 1];
+                    if (same(p00, p01) && same(p10, p11)) continue;
+                    if (same(p00, p10) && same(p01, p11)) continue;
+                    const a = i * nL + j;
+                    const b = a + 1;
+                    const c = i2 * nL + j;
+                    const d = c + 1;
+                    if (!triangleBuriesRoad(i, p00, p10, p01, sections, buckets)) indices.push(a, c, b);
+                    if (!triangleBuriesRoad(i, p01, p10, p11, sections, buckets)) indices.push(b, c, d);
+                }
+            }
+            const patched = fillCorridorHoles(positions, uvs, colors, indices, sections, buckets);
+            positions = patched.positions;
+            uvs = patched.uvs;
+            colors = patched.colors;
+            if (!indices.length) {
+                clearEarthMesh();
+                return null;
+            }
+
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(indices), 1));
+            const up = earthWindingUp(positions, indices);
+            if (up < 0) {
+                const idx = geometry.index.array;
+                for (let t = 0; t < idx.length; t += 3) {
+                    const swap = idx[t];
+                    idx[t] = idx[t + 1];
+                    idx[t + 1] = swap;
+                }
+                geometry.index.needsUpdate = true;
+            }
+            geometry.computeVertexNormals();
+            geometry.computeBoundingSphere();
+            earthMesh.geometry.dispose();
+            earthMesh.geometry = geometry;
+            earthMesh.visible = true;
+            if (earthMesh.parent !== terrainMesh) terrainMesh.add(earthMesh);
+            return { maxExtent, edge, buckets };
+        }
+
+        function earthWindingUp(positions, indices) {
+            let sum = 0;
+            const step = Math.max(3, (Math.floor(indices.length / 3 / 24) * 3) || 3);
+            for (let t = 0; t < indices.length; t += step) {
+                const ia = indices[t] * 3;
+                const ib = indices[t + 1] * 3;
+                const ic = indices[t + 2] * 3;
+                const bx = positions[ib] - positions[ia];
+                const by = positions[ib + 1] - positions[ia + 1];
+                const bz = positions[ib + 2] - positions[ia + 2];
+                const cx = positions[ic] - positions[ia];
+                const cy = positions[ic + 1] - positions[ia + 1];
+                const cz = positions[ic + 2] - positions[ia + 2];
+                sum += bz * cx - bx * cz;
+            }
+            return sum;
+        }
+
+        function omitCoarseQuads(sections, built) {
+            if (!coarseMesh || !built) return;
+            const { edge, buckets } = built;
+            const { rows, cols } = terrain;
+            const pos = coarseMesh.geometry.attributes.position;
+            const searchR = edge + MAX_CATCH_M + demCellDiagonalM() + 80;
+            const onDeck = new Uint8Array(rows * cols);
+            const underEarth = new Uint8Array(rows * cols);
+            const earthTop = earthMesh?.visible ? renderedTopSampler('earth') : null;
+            for (let k = 0; k < rows * cols; k++) {
+                const x = pos.getX(k);
+                const y = -pos.getZ(k);
+                const j = nearestSection(x, y, sections, buckets, searchR);
+                if (j >= 0) {
+                    const s = sections[j];
+                    const lat = Math.abs((x - s.x) * s.nx + (y - s.y) * s.ny);
+                    if (lat <= edge + 2) onDeck[k] = 1;
+                }
+                if (earthTop && earthTop(x, y) != null) underEarth[k] = 1;
+            }
+            const src = coarseIndex;
+            const next = [];
+            for (let t = 0; t < src.length; t += 6) {
+                const a = src[t];
+                const b = src[t + 1];
+                const c = src[t + 2];
+                const d = src[t + 4];
+                const mx = (pos.getX(a) + pos.getX(b) + pos.getX(c) + pos.getX(d)) / 4;
+                const my = -(pos.getZ(a) + pos.getZ(b) + pos.getZ(c) + pos.getZ(d)) / 4;
+                let centroidLat = Infinity;
+                const mj = nearestSection(mx, my, sections, buckets, searchR);
+                if (mj >= 0) {
+                    const ms = sections[mj];
+                    centroidLat = Math.abs((mx - ms.x) * ms.nx + (my - ms.y) * ms.ny);
+                }
+                const cornerNear = onDeck[a] || onDeck[b] || onDeck[c] || onDeck[d];
+                const covered = underEarth[a] && underEarth[b] && underEarth[c] && underEarth[d];
+                // A DEM cell that touches the carriageway, or sits under the earthworks
+                // mesh, would draw the original hillside over the designed road.
+                const drop = cornerNear || centroidLat <= edge + 1 || covered;
+                if (drop) continue;
+                next.push(src[t], src[t + 1], src[t + 2], src[t + 3], src[t + 4], src[t + 5]);
+            }
+            coarseMesh.geometry.setIndex(next);
+            coarseMesh.geometry.computeVertexNormals();
+        }
+
+        // Derived display mesh. Source heights, the DEM files, and the layout
+        // stay as loaded. Reported cut and fill still slope from the pavement
+        // edge; the mesh adds the shoulder before the same 1:2.
+        function blendEarthworksIntoHeights() {
+            ensureDisplayHeights();
+            if (!terrain || !coarseMesh) return;
+            terrain.displayHeights.set(terrain.heights);
+            writeDisplayHeightsToMesh();
+            restoreCoarseIndex();
+            clearEarthMesh();
+            const sections = designEnabled() ? verticalProfile?.sections : null;
+            if (!sections?.length) return;
+            const built = buildEarthworksMesh(sections);
+            omitCoarseQuads(sections, built);
+            if (terrainMesh) terrainMesh.updateWorldMatrix(true, true);
+        }
+
+        function writeDisplayHeightsToMesh() {
+            if (!coarseMesh || !terrain?.displayHeights) return;
+            const pos = coarseMesh.geometry.attributes.position;
+            const h = terrain.displayHeights;
+            for (let k = 0; k < h.length; k++) pos.setY(k, h[k] - baseElevation);
+            pos.needsUpdate = true;
+            coarseMesh.geometry.computeVertexNormals();
+            coarseMesh.geometry.computeBoundingSphere();
+        }
+
+        function bindingBrief(runs) {
+            const interesting = (runs || []).filter((r) => r.status === 'violated' || r.kind === 'depth');
+            if (!interesting.length) return 'No limit is binding.';
+            const parts = interesting.slice(0, 3).map((run) => {
+                let label = run.kind;
+                if (run.kind === 'gradient') label = `gradient ${(Math.abs(run.peak) * 100).toFixed(1)}%`;
+                else if (run.kind === 'crest_radius') label = `crest R ${Math.round(run.peak)} m`;
+                else if (run.kind === 'dip_radius') label = `dip R ${Math.round(run.peak)} m`;
+                else if (run.kind === 'depth') label = `depth cap ${run.status} ${Math.abs(run.peak).toFixed(1)} m`;
+                const span = run.wraps
+                    ? `${Math.round(run.start_m)} m wrapping to ${Math.round(run.end_m)} m`
+                    : `${Math.round(run.start_m)}–${Math.round(run.end_m)} m`;
+                return `${label} @ ${span}`;
+            });
+            const extra = interesting.length - parts.length;
+            if (extra > 0) parts.push(`+${extra} more`);
+            return parts.join('; ') + '.';
+        }
+
+        function drawProfileChart() {
+            const canvas = document.getElementById('profile-chart');
+            const note = document.getElementById('profile-note');
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            const w = canvas.width;
+            const h = canvas.height;
+            ctx.clearRect(0, 0, w, h);
+            ctx.fillStyle = '#10141c';
+            ctx.fillRect(0, 0, w, h);
+            const profile = verticalProfile;
+            if (!profile) {
+                if (note) note.textContent = '';
+                return;
+            }
+            const terrainZ = profile.terrain_z;
+            const designZ = profile.design_z;
+            const n = terrainZ.length;
+            let lo = Infinity;
+            let hi = -Infinity;
+            for (let i = 0; i < n; i++) {
+                if (terrainZ[i] < lo) lo = terrainZ[i];
+                if (designZ[i] < lo) lo = designZ[i];
+                if (terrainZ[i] > hi) hi = terrainZ[i];
+                if (designZ[i] > hi) hi = designZ[i];
+            }
+            const pad = 6;
+            const span = Math.max(hi - lo, 1);
+            const xOf = (i) => pad + (i / Math.max(n - 1, 1)) * (w - pad * 2);
+            const yOf = (z) => pad + (hi - z) / span * (h - pad * 2);
+            for (let i = 0; i < n - 1; i++) {
+                ctx.fillStyle = terrainZ[i] >= designZ[i] ? 'rgba(224, 122, 61, 0.55)' : 'rgba(61, 139, 255, 0.5)';
+                ctx.beginPath();
+                ctx.moveTo(xOf(i), yOf(terrainZ[i]));
+                ctx.lineTo(xOf(i + 1), yOf(terrainZ[i + 1]));
+                ctx.lineTo(xOf(i + 1), yOf(designZ[i + 1]));
+                ctx.lineTo(xOf(i), yOf(designZ[i]));
+                ctx.closePath();
+                ctx.fill();
+            }
+            const stroke = (arr, color, width) => {
+                ctx.beginPath();
+                ctx.strokeStyle = color;
+                ctx.lineWidth = width;
+                for (let i = 0; i < n; i++) {
+                    const x = xOf(i);
+                    const y = yOf(arr[i]);
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+            };
+            stroke(terrainZ, '#9aa4b2', 1);
+            stroke(designZ, '#7dffb3', 1.5);
+            if (note) {
+                const ew = profile.earthworks;
+                const open = ew.open_m?.length || ew.daylight_miss_m?.length || 0;
+                const openText = open ? ` ${open} stations flagged open at ${MAX_CATCH_M.toFixed(0)} m.` : '';
+                const solve = profile.solve_status && profile.solve_status !== 'converged'
+                    ? ` ${profile.solve_status}.`
+                    : '';
+                note.textContent =
+                    `Cut ${ew.max_cut_m.toFixed(1)} m / ${Math.round(ew.cut_m3)} m³, `
+                    + `fill ${ew.max_fill_m.toFixed(1)} m / ${Math.round(ew.fill_m3)} m³.${openText}${solve} `
+                    + `Volumes slope from the pavement edge. The mesh holds a ${SHOULDER_M.toFixed(0)} m shoulder and a ${EARTH_STEP_M.toFixed(0)} m flat step, then the same 1:2. `
+                    + bindingBrief(profile.bindings);
+            }
+        }
+
         function applyWorkingLayout() {
             if (!workingPoints || workingPoints.length < 2) return;
             liveMetrics = analyzeLayout(workingPoints, sampleZ);
-            layoutPoints = liveMetrics.points;
+            layoutPoints = liveMetrics.points.map((p) => ({ ...p, terrainZ: p.z }));
+            fitVerticalProfile();
+            if (designEnabled() && verticalProfile) {
+                const designAt = verticalProfile.design_at_points;
+                for (let i = 0; i < layoutPoints.length; i++) layoutPoints[i].z = designAt[i];
+            }
+            blendEarthworksIntoHeights();
             rebuildDriveProfile();
             buildTrackRibbon();
             buildCornerLabels();
             updateLayoutUI();
+            drawProfileChart();
             if (editMode) syncHandles();
             if (!dragging) scheduleViewshed();
             else {
@@ -1618,7 +2471,7 @@
             pointerNdc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
             raycaster.far = Infinity;
             raycaster.setFromCamera(pointerNdc, camera);
-            const hits = raycaster.intersectObject(terrainMesh, false);
+            const hits = raycaster.intersectObject(terrainMesh, true);
             if (!hits.length) return null;
             return { x: hits[0].point.x, y: -hits[0].point.z };
         }
@@ -1732,7 +2585,8 @@
 
         function meshElevation(layoutX, layoutY) {
             if (!terrain) return baseElevation;
-            const { rows, cols, left, top, resX, resY, heights } = terrain;
+            const { rows, cols, left, top, resX, resY } = terrain;
+            const heights = terrain.displayHeights || terrain.heights;
             const lon = frame.lon0 + layoutX / frame.sx;
             const lat = frame.lat0 + layoutY / frame.sy;
             let col = (lon - left) / resX - 0.5;
@@ -1805,13 +2659,21 @@
             return { ...p, speedMps: NOMINAL_SPEED_MPS, state: 'coast', gradientPct: 0 };
         }
 
+        function designedCentreZ(distance) {
+            if (!designEnabled() || !verticalProfile) return null;
+            const c = sampleCentreline(distance);
+            return c ? c.z : null;
+        }
+
         function onboardStation(distance) {
             const p = drivePoint(distance);
             if (!p) return null;
-            const ground = meshElevation(p.x, p.y);
+            const designedZ = designedCentreZ(distance);
+            const ground = designedZ != null ? designedZ : meshElevation(p.x, p.y);
             const scale = world?.scale.y || 1;
             return {
                 ...p,
+                z: designedZ != null ? designedZ : p.z,
                 ground,
                 eye: ground + EYE_HEIGHT_M,
                 sceneX: p.x,
@@ -1825,7 +2687,7 @@
             _rayOrigin.set(layoutX, 8000, -layoutY);
             raycaster.set(_rayOrigin, _down);
             raycaster.far = 20000;
-            const hits = raycaster.intersectObject(terrainMesh, false);
+            const hits = raycaster.intersectObject(terrainMesh, true);
             return hits.length ? hits[0].point.y : null;
         }
 
@@ -1860,14 +2722,15 @@
                 carMarker.visible = false;
                 return;
             }
-            const ground = meshElevation(p.x, p.y);
+            const designedZ = designedCentreZ(driveDistance);
+            const ground = designedZ != null ? designedZ : meshElevation(p.x, p.y);
             const scaleY = world?.scale.y || 1;
             const worldPos = new THREE.Vector3(
                 p.x,
-                (ground - baseElevation + 0.525) * scaleY,
+                (ground - baseElevation + CAR_CENTRE_M) * scaleY,
                 -p.y,
             );
-            carMarker.position.set(p.x, ground - baseElevation + 0.525, -p.y);
+            carMarker.position.set(p.x, ground - baseElevation + CAR_CENTRE_M, -p.y);
             const fwd = carForward(driveDistance);
             carMarker.rotation.set(0, Math.atan2(fwd.x, fwd.z), 0);
             // The onboard camera is the driver's eye, a few centimetres above this roof.
@@ -2247,6 +3110,352 @@
             setCameraMode(requested);
         }
 
+        function lateralToRoad(x, y) {
+            const sections = verticalProfile?.sections;
+            if (!sections?.length) return null;
+            let best = Infinity;
+            let lat = null;
+            for (let i = 0; i < sections.length; i++) {
+                const s = sections[i];
+                const d = (s.x - x) * (s.x - x) + (s.y - y) * (s.y - y);
+                if (d < best) {
+                    best = d;
+                    lat = Math.abs((x - s.x) * s.nx + (y - s.y) * s.ny);
+                }
+            }
+            return lat;
+        }
+
+        function layoutInsideTerrain(layoutX, layoutY) {
+            if (!terrain || !frame.sx) return false;
+            const { rows, cols, left, top, resX, resY } = terrain;
+            const lon = frame.lon0 + layoutX / frame.sx;
+            const lat = frame.lat0 + layoutY / frame.sy;
+            const col = (lon - left) / resX - 0.5;
+            const row = (top - lat) / resY - 0.5;
+            return col >= -0.01 && row >= -0.01 && col <= cols - 0.99 && row <= rows - 0.99;
+        }
+
+        function renderedTopSampler(which = 'both') {
+            const cell = 16;
+            const buckets = new Map();
+            const tmp = new THREE.Vector3();
+            const addMesh = (mesh) => {
+                if (!mesh?.visible || !mesh.parent) return;
+                const geo = mesh.geometry;
+                const pos = geo?.attributes?.position;
+                const index = geo?.index;
+                if (!pos || !index || index.count < 3) return;
+                mesh.updateWorldMatrix(true, false);
+                const m = mesh.matrixWorld;
+                const n = pos.count;
+                const wx = new Float32Array(n);
+                const wy = new Float32Array(n);
+                const wz = new Float32Array(n);
+                for (let i = 0; i < n; i++) {
+                    tmp.fromBufferAttribute(pos, i).applyMatrix4(m);
+                    wx[i] = tmp.x;
+                    wy[i] = tmp.y;
+                    wz[i] = tmp.z;
+                }
+                for (let t = 0; t < index.count; t += 3) {
+                    const ia = index.getX(t);
+                    const ib = index.getX(t + 1);
+                    const ic = index.getX(t + 2);
+                    const ax = wx[ia];
+                    const az = wz[ia];
+                    const bx = wx[ib];
+                    const bz = wz[ib];
+                    const cx = wx[ic];
+                    const cz = wz[ic];
+                    const minX = Math.min(ax, bx, cx);
+                    const maxX = Math.max(ax, bx, cx);
+                    const minZ = Math.min(az, bz, cz);
+                    const maxZ = Math.max(az, bz, cz);
+                    if (maxX - minX < 1e-5 && maxZ - minZ < 1e-5) continue;
+                    const tri = [ax, wy[ia], az, bx, wy[ib], bz, cx, wy[ic], cz];
+                    const i0 = Math.floor(minX / cell);
+                    const i1 = Math.floor(maxX / cell);
+                    const k0 = Math.floor(minZ / cell);
+                    const k1 = Math.floor(maxZ / cell);
+                    for (let ix = i0; ix <= i1; ix++) {
+                        for (let iz = k0; iz <= k1; iz++) {
+                            const key = `${ix}:${iz}`;
+                            let list = buckets.get(key);
+                            if (!list) {
+                                list = [];
+                                buckets.set(key, list);
+                            }
+                            list.push(tri);
+                        }
+                    }
+                }
+            };
+            if (which !== 'earth') addMesh(coarseMesh);
+            if (which !== 'coarse') addMesh(earthMesh);
+            return (layoutX, layoutY) => {
+                const x = layoutX;
+                const z = -layoutY;
+                const ix = Math.floor(x / cell);
+                const iz = Math.floor(z / cell);
+                let best = null;
+                for (let dx = -1; dx <= 1; dx++) {
+                    for (let dz = -1; dz <= 1; dz++) {
+                        const list = buckets.get(`${ix + dx}:${iz + dz}`);
+                        if (!list) continue;
+                        for (let i = 0; i < list.length; i++) {
+                            const y = triangleHeightY(x, z, list[i]);
+                            if (y == null) continue;
+                            if (best == null || y > best) best = y;
+                        }
+                    }
+                }
+                return best;
+            };
+        }
+
+        function triangleHeightY(px, pz, tri) {
+            const ax = tri[0];
+            const ay = tri[1];
+            const az = tri[2];
+            const bx = tri[3];
+            const by = tri[4];
+            const bz = tri[5];
+            const cx = tri[6];
+            const cy = tri[7];
+            const cz = tri[8];
+            const v0x = bx - ax;
+            const v0z = bz - az;
+            const v1x = cx - ax;
+            const v1z = cz - az;
+            const v2x = px - ax;
+            const v2z = pz - az;
+            const den = v0x * v1z - v0z * v1x;
+            const span = Math.hypot(v0x, v0z) + Math.hypot(v1x, v1z);
+            if (Math.abs(den) < Math.max(1e-4, span * 1e-3)) return null;
+            const u = (v2x * v1z - v2z * v1x) / den;
+            const v = (v0x * v2z - v0z * v2x) / den;
+            if (u < -1e-4 || v < -1e-4 || u + v > 1 + 1e-4) return null;
+            return ay + u * (by - ay) + v * (cy - ay);
+        }
+
+        function probeRenderedClearance(stepM = 8) {
+            const marginM = 0.3;
+            const roadTolM = 0.15;
+            if (!layoutPoints || !liveMetrics || !camera || !world) return null;
+            const lap = liveMetrics.lapLengthM;
+            const step = Math.max(2, stepM);
+            const savedScale = world.scale.y;
+            const savedDist = driveDistance;
+            const savedOrbit = heliOrbit;
+            const savedStand = grandstandIndex;
+            const savedLook = lookState;
+            const savedLookReady = lookReady;
+            const savedPos = camera.position.clone();
+            const savedQuat = camera.quaternion.clone();
+            const savedUp = camera.up.clone();
+            world.scale.y = 1;
+            if (terrainMesh) terrainMesh.updateWorldMatrix(true, true);
+            const topY = (layoutX, layoutY) => raycastSceneY(layoutX, layoutY);
+            const round = (v) => Math.round(v * 1000) / 1000;
+
+            const sampleLoop = (place) => {
+                let minC = Infinity;
+                let minAt = 0;
+                let samples = 0;
+                let violations = 0;
+                let misses = 0;
+                const examples = [];
+                for (let d = 0; d < lap; d += step) {
+                    place(d);
+                    const lx = camera.position.x;
+                    const ly = -camera.position.z;
+                    if (!layoutInsideTerrain(lx, ly)) continue;
+                    samples++;
+                    const hitY = topY(lx, ly);
+                    if (hitY == null) {
+                        misses++;
+                        violations++;
+                        if (examples.length < 5) {
+                            examples.push({
+                                distanceM: Math.round(d),
+                                kind: 'miss',
+                                x: round(lx),
+                                y: round(ly),
+                                lateralM: round(lateralToRoad(lx, ly) ?? -1),
+                            });
+                        }
+                        continue;
+                    }
+                    const clearance = camera.position.y - hitY;
+                    if (clearance < minC) {
+                        minC = clearance;
+                        minAt = d;
+                    }
+                    if (clearance < marginM) {
+                        violations++;
+                        if (examples.length < 5) {
+                            examples.push({ distanceM: Math.round(d), clearanceM: round(clearance) });
+                        }
+                    }
+                }
+                return {
+                    minClearanceM: samples ? round(minC) : null,
+                    minAtM: Math.round(minAt),
+                    samples,
+                    violations,
+                    misses,
+                    examples,
+                };
+            };
+
+            const onboard = sampleLoop((d) => applyOnboard(d, 0));
+            const chase = sampleLoop((d) => {
+                heliOrbit = 0;
+                applyHelicopter(d, 0);
+            });
+            const helicopter = sampleLoop((d) => {
+                heliOrbit = 0.55;
+                applyHelicopter(d, 0);
+            });
+            const stands = [];
+            for (let i = 0; i < driveStands.length; i++) {
+                grandstandIndex = i;
+                applyGrandstand(savedDist);
+                const lx = camera.position.x;
+                const ly = -camera.position.z;
+                const hitY = layoutInsideTerrain(lx, ly) ? topY(lx, ly) : null;
+                stands.push({
+                    name: driveStands[i].name,
+                    clearanceM: hitY == null ? null : round(camera.position.y - hitY),
+                    insideTerrain: layoutInsideTerrain(lx, ly),
+                });
+            }
+
+            const sections = verticalProfile?.sections || [];
+            let roadSamples = 0;
+            let roadViolations = 0;
+            let roadMisses = 0;
+            let worstBury = -Infinity;
+            let worstAt = 0;
+            let worstLateral = 0;
+            let worstXY = null;
+            const roadExamples = [];
+            const half = sections[0]?.half_m || trackWidthM() / 2;
+            const edge = half + SHOULDER_M;
+            const n = sections.length;
+            for (let i = 0; i < n; i++) {
+                const a = sections[i];
+                const b = sections[(i + 1) % n];
+                const distanceM = layoutPoints[i]?.distance ?? (i / n) * lap;
+                const spots = [];
+                const inset = Math.min(1, edge * 0.25);
+                for (const lateral of [-edge + inset, -half, 0, half, edge - inset]) {
+                    spots.push([
+                        a.x + a.nx * lateral,
+                        a.y + a.ny * lateral,
+                        a.z_design,
+                        distanceM,
+                        lateral,
+                    ]);
+                    spots.push([
+                        (a.x + a.nx * lateral + b.x + b.nx * lateral) / 2,
+                        (a.y + a.ny * lateral + b.y + b.ny * lateral) / 2,
+                        (a.z_design + b.z_design) / 2,
+                        distanceM,
+                        lateral,
+                    ]);
+                }
+                for (const spot of spots) {
+                    const x = spot[0];
+                    const y = spot[1];
+                    const roadZ = spot[2];
+                    const lateral = spot[4];
+                    {
+                        if (!layoutInsideTerrain(x, y)) continue;
+                        roadSamples++;
+                        const hitY = topY(x, y);
+                        if (hitY == null) {
+                            roadMisses++;
+                            roadViolations++;
+                            if (roadExamples.length < 8) {
+                                roadExamples.push({
+                                    distanceM: Math.round(spot[3]),
+                                    lateral,
+                                    kind: 'miss',
+                                    x: Math.round(x * 10) / 10,
+                                    y: Math.round(y * 10) / 10,
+                                });
+                            }
+                            continue;
+                        }
+                        const elev = baseElevation + hitY;
+                        const bury = elev - roadZ;
+                        if (bury > worstBury) {
+                            worstBury = bury;
+                            worstAt = spot[3];
+                            worstLateral = lateral;
+                            worstXY = { x, y };
+                        }
+                        if (bury > roadTolM) {
+                            roadViolations++;
+                            if (roadExamples.length < 8) {
+                                roadExamples.push({
+                                    distanceM: Math.round(spot[3]),
+                                    lateral: round(lateral),
+                                    buryM: round(bury),
+                                    terrainM: round(elev),
+                                    roadM: round(roadZ),
+                                    x: round(x),
+                                    y: round(y),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            world.scale.y = savedScale;
+            driveDistance = savedDist;
+            heliOrbit = savedOrbit;
+            grandstandIndex = savedStand;
+            lookState = savedLook;
+            lookReady = savedLookReady;
+            camera.position.copy(savedPos);
+            camera.quaternion.copy(savedQuat);
+            camera.up.copy(savedUp);
+            if (terrainMesh) terrainMesh.updateWorldMatrix(true, true);
+            if (cameraMode !== 'orbit') applyDriveCamera(null);
+
+            const ew = verticalProfile?.earthworks;
+            return {
+                marginM,
+                roadTolM,
+                shoulderM: SHOULDER_M,
+                sideSlope: '1:2',
+                onboard,
+                chase,
+                helicopter,
+                stands,
+                road: {
+                    samples: roadSamples,
+                    violations: roadViolations,
+                    misses: roadMisses,
+                    worstBuryM: roadSamples ? round(worstBury) : null,
+                    worstAtM: Math.round(worstAt),
+                    worstLateralM: round(worstLateral),
+                    worstXY,
+                    examples: roadExamples,
+                },
+                volumes: ew ? {
+                    cutM3: ew.cut_m3,
+                    fillM3: ew.fill_m3,
+                    maxCutM: ew.max_cut_m,
+                    maxFillM: ew.max_fill_m,
+                } : null,
+            };
+        }
+
         function probeOnboardClearance(stepM = 5) {
             if (!layoutPoints || !liveMetrics) return null;
             const lap = liveMetrics.lapLengthM;
@@ -2262,8 +3471,11 @@
             for (let d = 0; d < lap; d += step) {
                 const eye = onboardStation(d);
                 if (!eye) continue;
-                const hit = raycastSceneY(eye.x, eye.y);
-                const groundY = hit == null ? sceneY(eye.ground) : hit;
+                const designZ = designedCentreZ(d);
+                const hit = designZ == null ? raycastSceneY(eye.x, eye.y) : null;
+                const groundY = designZ != null
+                    ? sceneY(designZ)
+                    : (hit == null ? sceneY(eye.ground) : hit);
                 const clearance = (eye.sceneY - groundY) / scale;
                 samples++;
                 if (clearance < minC) {
@@ -2296,10 +3508,43 @@
         function clearanceUnderCamera() {
             if (!camera) return null;
             const scale = world.scale.y || 1;
+            if (cameraMode === 'onboard') {
+                const designZ = designedCentreZ(driveDistance);
+                if (designZ != null) return (camera.position.y - sceneY(designZ)) / scale;
+            }
             if (terrainMesh) terrainMesh.updateWorldMatrix(true, true);
             const hit = raycastSceneY(camera.position.x, -camera.position.z);
             if (hit == null) return null;
             return (camera.position.y - hit) / scale;
+        }
+
+        function maxMarkerDesignError(stepM = 10) {
+            if (!layoutPoints || !liveMetrics || !designEnabled() || !verticalProfile) return null;
+            const lap = liveMetrics.lapLengthM;
+            const step = Math.max(1, stepM);
+            const scale = world?.scale.y || 1;
+            const saved = driveDistance;
+            let worst = 0;
+            let at = 0;
+            let samples = 0;
+            for (let d = 0; d < lap; d += step) {
+                const designZ = designedCentreZ(d);
+                if (designZ == null) continue;
+                driveDistance = d;
+                updateCarMarker();
+                const marker = markerWorld();
+                if (!marker) continue;
+                const elev = baseElevation + marker.y / scale - CAR_CENTRE_M;
+                const err = Math.abs(elev - designZ);
+                samples++;
+                if (err > worst) {
+                    worst = err;
+                    at = d;
+                }
+            }
+            driveDistance = saved;
+            updateCarMarker();
+            return { maxAbsM: worst, atM: at, samples };
         }
 
         async function init() {
@@ -2366,6 +3611,7 @@
                         numCorners: liveMetrics?.numCorners ?? null,
                         minRadiusM: liveMetrics?.minRadiusM ?? null,
                         maxGradientPct: liveMetrics?.maxGradientPct ?? null,
+                        designGradientPct: liveMetrics?.designGradientPct ?? null,
                         viewshedPct: liveViewshedPct,
                         viewshedPending,
                         viewshedMs,
@@ -2380,6 +3626,29 @@
                         speedKmh: driveProfile ? sampleProfile(driveProfile, driveDistance)?.speedKmh ?? null : null,
                         driveState: driveProfile ? sampleProfile(driveProfile, driveDistance)?.state ?? null : null,
                         lapEstimateS: driveProfile?.lapTimeS ?? null,
+                    };
+                },
+                verticalSummary() {
+                    if (!verticalProfile) return null;
+                    const ew = verticalProfile.earthworks;
+                    return {
+                        designed: designEnabled(),
+                        feasible: verticalProfile.feasible,
+                        terrainGradientPct: liveMetrics?.maxGradientPct ?? null,
+                        designGradientPct: liveMetrics?.designGradientPct ?? null,
+                        terrainMinCrestM: verticalProfile.terrain.min_crest_radius_m,
+                        designMinCrestM: verticalProfile.design.min_crest_radius_m,
+                        terrainMinDipM: verticalProfile.terrain.min_dip_radius_m,
+                        designMinDipM: verticalProfile.design.min_dip_radius_m,
+                        maxCutM: ew.max_cut_m,
+                        maxFillM: ew.max_fill_m,
+                        cutM3: ew.cut_m3,
+                        fillM3: ew.fill_m3,
+                        joinStepM: verticalProfile.join_step_m,
+                        bindingCount: verticalProfile.bindings.length,
+                        solveStatus: verticalProfile.solve_status,
+                        openStations: verticalProfile.earthworks.open_m?.length || 0,
+                        note: document.getElementById('profile-note')?.textContent || '',
                     };
                 },
                 profileSummary() {
@@ -2448,8 +3717,10 @@
                 setCameraMode,
                 setDriveDistance,
                 probeOnboardClearance,
+                probeRenderedClearance,
                 clearanceUnderCamera,
                 markerWorld,
+                maxMarkerDesignError,
                 cameraState() {
                     return {
                         x: camera.position.x,
@@ -2542,6 +3813,14 @@
                 }
             });
             
+            document.getElementById('designed-profile').addEventListener('change', () => {
+                if (workingPoints) applyWorkingLayout();
+            });
+            for (const id of ['cut-fill-cap', 'crest-radius', 'dip-radius']) {
+                document.getElementById(id).addEventListener('change', () => {
+                    if (workingPoints) applyWorkingLayout();
+                });
+            }
             document.getElementById('show-layout').addEventListener('change', (e) => {
                 if (trackGroup) trackGroup.visible = e.target.checked;
             });

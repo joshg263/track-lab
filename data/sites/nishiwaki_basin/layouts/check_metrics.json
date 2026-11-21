@@ -28,7 +28,20 @@
     "max_gradient_pct": 31.5,
     "max_gradient_pass": false,
     "gradient_window_m": 100.0,
-    "road_profile_smooth_m": 15.0
+    "road_profile_smooth_m": 15.0,
+    "design_max_gradient_pct": 28.1,
+    "design_max_gradient_pass": false,
+    "terrain_min_crest_radius_m": 29.6,
+    "design_min_crest_radius_m": 51.3,
+    "terrain_min_dip_radius_m": 24.2,
+    "design_min_dip_radius_m": 51.6,
+    "max_cut_m": 6.0,
+    "max_fill_m": 6.0,
+    "cut_m3": 206986.0,
+    "fill_m3": 67865.0,
+    "min_crest_radius_m": 1000.0,
+    "min_dip_radius_m": 600.0,
+    "max_cut_fill_m": 6.0
   },
   "layout_b_elevation_sweep": {
     "layout_name": "layout_b_elevation_sweep",
@@ -47,7 +60,20 @@
     "max_gradient_pct": 31.0,
     "max_gradient_pass": false,
     "gradient_window_m": 100.0,
-    "road_profile_smooth_m": 15.0
+    "road_profile_smooth_m": 15.0,
+    "design_max_gradient_pct": 25.8,
+    "design_max_gradient_pass": false,
+    "terrain_min_crest_radius_m": 31.9,
+    "design_min_crest_radius_m": 36.5,
+    "terrain_min_dip_radius_m": 22.8,
+    "design_min_dip_radius_m": 32.7,
+    "max_cut_m": 6.0,
+    "max_fill_m": 6.0,
+    "cut_m3": 221610.0,
+    "fill_m3": 64038.0,
+    "min_crest_radius_m": 1000.0,
+    "min_dip_radius_m": 600.0,
+    "max_cut_fill_m": 6.0
   },
   "layout_c_arena": {
     "layout_name": "layout_c_arena",
@@ -74,6 +100,19 @@
     "max_gradient_pct": 35.5,
     "max_gradient_pass": false,
     "gradient_window_m": 100.0,
-    "road_profile_smooth_m": 15.0
+    "road_profile_smooth_m": 15.0,
+    "design_max_gradient_pct": 29.1,
+    "design_max_gradient_pass": false,
+    "terrain_min_crest_radius_m": 12.2,
+    "design_min_crest_radius_m": 55.2,
+    "terrain_min_dip_radius_m": 12.5,
+    "design_min_dip_radius_m": 23.7,
+    "max_cut_m": 6.0,
+    "max_fill_m": 6.0,
+    "cut_m3": 167844.0,
+    "fill_m3": 74949.0,
+    "min_crest_radius_m": 1000.0,
+    "min_dip_radius_m": 600.0,
+    "max_cut_fill_m": 6.0
   }
 }
