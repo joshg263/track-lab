@@ -13,13 +13,19 @@ export const DEFAULT_CAR = {
     topSpeedKmh: 250,
 };
 
-export const DEFAULT_EDGE_MARGIN_M = 0.6;
+export const DEFAULT_EDGE_MARGIN_M = 1;
 export const DEFAULT_LOOKAHEAD_S = 1.5;
 
-const LINE_WINDOW_M = 16;
-const LINE_ITERATIONS = 48;
-const LINE_RELAX = 0.7;
-const OFFSET_SMOOTH_SAMPLES = 4;
+// Stations about this far apart. Curvature is minimised on those offsets,
+// then blended back onto every centreline sample.
+const LINE_STATION_M = 8;
+const LINE_RIDGE = 1e-7;
+const LINE_CORNER_RADIUS_M = 170;
+const LINE_LONG_STRAIGHT_M = 180;
+const LINE_LATE_APEX_BOOST = 10;
+const LINE_MIN_LATE_TURN_RAD = 20 * Math.PI / 180;
+const LINE_SLOPE = 2e-3;
+const LINE_OFFSET_SMOOTH = 3;
 const RADIUS_HALF_WINDOW_M = 10;
 const CURVATURE_SMOOTH_SAMPLES = 3;
 const SPEED_ITERS = 32;
@@ -94,48 +100,462 @@ function centrelineFrame(points, lapLengthM) {
     return { n, cx, cy, cz, distance, nx, ny, lap };
 }
 
-// Iterative minimum-curvature offset. Each pass moves a station toward the
-// straight chord between neighbours a short way ahead and behind, then clamps
-// that offset to the usable half-width. The chord of a bend falls to the
-// inside, so corners open onto the width instead of hugging the centreline.
-function minimumCurvatureOffsets(frame, limitM) {
-    const { n, cx, cy, nx, ny, lap } = frame;
-    const spacing = lap / n;
-    const step = Math.max(2, Math.round(LINE_WINDOW_M / Math.max(spacing, 0.5)));
-    let offsets = new Array(n).fill(0);
-    const next = new Array(n);
-    for (let iter = 0; iter < LINE_ITERATIONS; iter++) {
-        for (let i = 0; i < n; i++) {
-            const im = (i - step + n) % n;
-            const ip = (i + step) % n;
-            const ax = cx[im] + offsets[im] * nx[im];
-            const ay = cy[im] + offsets[im] * ny[im];
-            const bx = cx[ip] + offsets[ip] * nx[ip];
-            const by = cy[ip] + offsets[ip] * ny[ip];
-            const dx = bx - ax;
-            const dy = by - ay;
-            const crossND = nx[i] * dy - ny[i] * dx;
-            let target;
-            if (Math.abs(crossND) < 1e-8) {
-                const mx = (ax + bx) / 2;
-                const my = (ay + by) / 2;
-                target = (mx - cx[i]) * nx[i] + (my - cy[i]) * ny[i];
-            } else {
-                const acx = ax - cx[i];
-                const acy = ay - cy[i];
-                target = (acx * dy - acy * dx) / crossND;
-            }
-            if (!Number.isFinite(target)) target = offsets[i];
-            target = clamp(target, -limitM, limitM);
-            next[i] = offsets[i] * (1 - LINE_RELAX) + target * LINE_RELAX;
+// Racing line inside the usable half-width. Offsets minimise path curvature,
+// so a real corner is outside, then apex, then outside, and a flat-out kink
+// is cut straighter than the centreline. A corner that opens onto a long
+// straight is weighted so the apex sits later and the exit stays wide.
+// Linked corners share one swing: the first does not get a full exit.
+function signedCurvature(x, y) {
+    const n = x.length;
+    const kappa = new Array(n);
+    for (let i = 0; i < n; i++) {
+        const im = (i - 1 + n) % n;
+        const ip = (i + 1) % n;
+        const v1x = x[i] - x[im];
+        const v1y = y[i] - y[im];
+        const v2x = x[ip] - x[i];
+        const v2y = y[ip] - y[i];
+        const phi = Math.atan2(v1x * v2y - v1y * v2x, v1x * v2x + v1y * v2y);
+        const ds = 0.5 * (Math.hypot(v1x, v1y) + Math.hypot(v2x, v2y));
+        kappa[i] = phi / Math.max(ds, 1e-4);
+    }
+    return kappa;
+}
+
+function factorBand(d0, d1, d2) {
+    const n = d0.length;
+    const l0 = new Float64Array(n);
+    const l1 = new Float64Array(Math.max(n - 1, 0));
+    const l2 = new Float64Array(Math.max(n - 2, 0));
+    for (let i = 0; i < n; i++) {
+        let s = d0[i];
+        if (i >= 1) s -= l1[i - 1] * l1[i - 1];
+        if (i >= 2) s -= l2[i - 2] * l2[i - 2];
+        if (!(s > 1e-18)) return null;
+        l0[i] = Math.sqrt(s);
+        if (i + 1 < n) {
+            let s1 = d1[i];
+            if (i >= 1) s1 -= l2[i - 1] * l1[i - 1];
+            l1[i] = s1 / l0[i];
         }
-        offsets = next.slice();
+        if (i + 2 < n) l2[i] = d2[i] / l0[i];
     }
-    for (let pass = 0; pass < 2; pass++) {
-        offsets = circularSmooth(offsets, OFFSET_SMOOTH_SAMPLES);
-        for (let i = 0; i < n; i++) offsets[i] = clamp(offsets[i], -limitM, limitM);
+    return { l0, l1, l2 };
+}
+
+function solveBand(fac, rhs) {
+    const { l0, l1, l2 } = fac;
+    const n = l0.length;
+    const y = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+        let s = rhs[i];
+        if (i >= 1) s -= l1[i - 1] * y[i - 1];
+        if (i >= 2) s -= l2[i - 2] * y[i - 2];
+        y[i] = s / l0[i];
     }
-    return offsets;
+    const x = new Float64Array(n);
+    for (let i = n - 1; i >= 0; i--) {
+        let s = y[i];
+        if (i + 1 < n) s -= l1[i] * x[i + 1];
+        if (i + 2 < n) s -= l2[i] * x[i + 2];
+        x[i] = s / l0[i];
+    }
+    return x;
+}
+
+function emptyBand(n) {
+    return {
+        d0: new Float64Array(n),
+        d1: new Float64Array(Math.max(n - 1, 0)),
+        d2: new Float64Array(Math.max(n - 2, 0)),
+        c01: 0,
+        c02: 0,
+        c1n: 0,
+    };
+}
+
+function copyBand(band) {
+    return {
+        d0: band.d0.slice(),
+        d1: band.d1.slice(),
+        d2: band.d2.slice(),
+        c01: band.c01,
+        c02: band.c02,
+        c1n: band.c1n,
+    };
+}
+
+function addEntry(band, i, j, value) {
+    const n = band.d0.length;
+    if (i === j) {
+        band.d0[i] += value;
+        return;
+    }
+    let a = i;
+    let b = j;
+    if (a > b) [a, b] = [b, a];
+    const forward = b - a;
+    const back = n - forward;
+    if (forward === 1 && forward <= back) band.d1[a] += value;
+    else if (forward === 2 && forward <= back) band.d2[a] += value;
+    else if (back === 1) band.c01 += value;
+    else if (a === 0 && b === n - 2) band.c02 += value;
+    else if (a === 1 && b === n - 1) band.c1n += value;
+}
+
+function applyFull(band, x) {
+    const n = band.d0.length;
+    const y = new Float64Array(n);
+    const { d0, d1, d2 } = band;
+    for (let i = 0; i < n; i++) {
+        let s = d0[i] * x[i];
+        if (i + 1 < n) s += d1[i] * x[i + 1];
+        if (i - 1 >= 0) s += d1[i - 1] * x[i - 1];
+        if (i + 2 < n) s += d2[i] * x[i + 2];
+        if (i - 2 >= 0) s += d2[i - 2] * x[i - 2];
+        y[i] = s;
+    }
+    if (n > 4) {
+        y[0] += band.c01 * x[n - 1] + band.c02 * x[n - 2];
+        y[n - 1] += band.c01 * x[0] + band.c1n * x[1];
+        y[n - 2] += band.c02 * x[0];
+        y[1] += band.c1n * x[n - 1];
+    }
+    return y;
+}
+
+function solveCyclic(band, rhs) {
+    const fac = factorBand(band.d0, band.d1, band.d2);
+    if (!fac) return null;
+    const n = rhs.length;
+    const x = new Float64Array(n);
+    let r = rhs.slice();
+    let z = solveBand(fac, r);
+    let p = z.slice();
+    let rz = 0;
+    for (let i = 0; i < n; i++) rz += r[i] * z[i];
+    const scale = Math.sqrt(rhs.reduce((s, v) => s + v * v, 0)) || 1;
+    for (let iter = 0; iter < 24; iter++) {
+        const Hp = applyFull(band, p);
+        let pHp = 0;
+        for (let i = 0; i < n; i++) pHp += p[i] * Hp[i];
+        if (!(Math.abs(pHp) > 1e-30)) break;
+        const alpha = rz / pHp;
+        let r2 = 0;
+        for (let i = 0; i < n; i++) {
+            x[i] += alpha * p[i];
+            r[i] -= alpha * Hp[i];
+            r2 += r[i] * r[i];
+        }
+        if (Math.sqrt(r2) / scale < 1e-8) break;
+        z = solveBand(fac, r);
+        let rzNew = 0;
+        for (let i = 0; i < n; i++) rzNew += r[i] * z[i];
+        const beta = rz === 0 ? 0 : rzNew / rz;
+        rz = rzNew;
+        for (let i = 0; i < n; i++) p[i] = z[i] + beta * p[i];
+    }
+    return x;
+}
+
+function coupledIndices(n, i) {
+    const out = [];
+    const push = (j) => {
+        if (j >= 0 && j < n && j !== i && !out.includes(j)) out.push(j);
+    };
+    push(i - 1);
+    push(i + 1);
+    push(i - 2);
+    push(i + 2);
+    if (i === 0) { push(n - 1); push(n - 2); }
+    if (i === 1) push(n - 1);
+    if (i === n - 1) { push(0); push(1); }
+    if (i === n - 2) push(0);
+    return out;
+}
+
+function bandEntry(band, i, j) {
+    const n = band.d0.length;
+    if (i === j) return band.d0[i];
+    let a = i;
+    let b = j;
+    if (a > b) [a, b] = [b, a];
+    const forward = b - a;
+    const back = n - forward;
+    if (forward === 1 && forward <= back) return band.d1[a];
+    if (forward === 2 && forward <= back) return band.d2[a];
+    if (back === 1) return band.c01;
+    if (a === 0 && b === n - 2) return band.c02;
+    if (a === 1 && b === n - 1) return band.c1n;
+    return 0;
+}
+
+function zeroBandEntry(band, i, j) {
+    const n = band.d0.length;
+    if (i === j) {
+        band.d0[i] = 0;
+        return;
+    }
+    let a = i;
+    let b = j;
+    if (a > b) [a, b] = [b, a];
+    const forward = b - a;
+    const back = n - forward;
+    if (forward === 1 && forward <= back) band.d1[a] = 0;
+    else if (forward === 2 && forward <= back) band.d2[a] = 0;
+    else if (back === 1) band.c01 = 0;
+    else if (a === 0 && b === n - 2) band.c02 = 0;
+    else if (a === 1 && b === n - 1) band.c1n = 0;
+}
+
+// Bound-constrained convex QP, min 0.5 n·H·n + g·n, |n| <= limit.
+// H is cyclic pentadiagonal. The working set is the stations held on a
+// bound. A full step that stays inside is optimal on that face, and a
+// station is released only when its gradient points back inside: nonpositive
+// on the upper bound, nonnegative on the lower. A step that would leave the
+// track stops on the bound and adds that station.
+function solveBoundedOffsets(band, g, limit) {
+    const n = g.length;
+    const fixed = new Int8Array(n);
+    const first = solveCyclic(band, Float64Array.from(g, (v) => -v));
+    const x = first ? first.slice() : new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+        if (x[i] >= limit) {
+            x[i] = limit;
+            fixed[i] = 1;
+        } else if (x[i] <= -limit) {
+            x[i] = -limit;
+            fixed[i] = -1;
+        }
+    }
+
+    const faceTarget = () => {
+        const reduced = copyBand(band);
+        const rhs = Float64Array.from(g, (v) => -v);
+        for (let i = 0; i < n; i++) {
+            if (fixed[i] === 0) continue;
+            const v = fixed[i] > 0 ? limit : -limit;
+            for (const j of coupledIndices(n, i)) {
+                const hij = bandEntry(reduced, i, j);
+                if (hij !== 0) rhs[j] -= hij * v;
+            }
+            for (const j of coupledIndices(n, i)) zeroBandEntry(reduced, i, j);
+            reduced.d0[i] = 1;
+            rhs[i] = v;
+        }
+        return solveCyclic(reduced, rhs);
+    };
+
+    for (let iter = 0; iter < n + 8; iter++) {
+        const target = faceTarget();
+        if (!target) break;
+        const dir = new Float64Array(n);
+        const hitAt = new Float64Array(n);
+        hitAt.fill(Infinity);
+        let alpha = 1;
+        for (let i = 0; i < n; i++) {
+            if (fixed[i] !== 0) continue;
+            const p = target[i] - x[i];
+            dir[i] = p;
+            if (Math.abs(p) < 1e-12) continue;
+            let room = Infinity;
+            if (p > 0) room = (limit - x[i]) / p;
+            else room = (-limit - x[i]) / p;
+            if (room < 1 - 1e-12) {
+                if (room < 0) room = 0;
+                hitAt[i] = room;
+                if (room < alpha) alpha = room;
+            }
+        }
+        for (let i = 0; i < n; i++) {
+            if (fixed[i] > 0) x[i] = limit;
+            else if (fixed[i] < 0) x[i] = -limit;
+            else x[i] = clamp(x[i] + alpha * dir[i], -limit, limit);
+        }
+        if (alpha < 1 - 1e-10) {
+            for (let i = 0; i < n; i++) {
+                if (fixed[i] !== 0 || !(hitAt[i] <= alpha + 1e-8)) continue;
+                fixed[i] = dir[i] > 0 ? 1 : -1;
+                x[i] = fixed[i] > 0 ? limit : -limit;
+            }
+            continue;
+        }
+        const grad = applyFull(band, x);
+        for (let i = 0; i < n; i++) grad[i] += g[i];
+        let scale = 0;
+        for (let i = 0; i < n; i++) scale = Math.max(scale, Math.abs(grad[i]), Math.abs(g[i]));
+        const tol = 1e-7 * Math.max(scale, 1);
+        let drop = -1;
+        let dropInward = tol;
+        for (let i = 0; i < n; i++) {
+            if (fixed[i] === 0) continue;
+            const inward = fixed[i] > 0 ? grad[i] : -grad[i];
+            if (inward > dropInward) {
+                dropInward = inward;
+                drop = i;
+            }
+        }
+        if (drop < 0) break;
+        fixed[drop] = 0;
+    }
+    for (let i = 0; i < n; i++) x[i] = clamp(x[i], -limit, limit);
+    return x;
+}
+
+// Largest KKT violation of |x| <= limit, divided by the largest |linear
+// term|. Zero when every free station is stationary and every bound station
+// has its gradient pointing outward. The scale is the curvature forcing, so
+// a clipped station whose objective still falls by moving inward does not
+// hide behind a large outward multiplier somewhere else.
+function boundGradientViolation(band, g, x, limit) {
+    const grad = applyFull(band, x);
+    let scale = 0;
+    for (let i = 0; i < g.length; i++) scale = Math.max(scale, Math.abs(g[i]));
+    let violation = 0;
+    for (let i = 0; i < x.length; i++) {
+        const gi = grad[i] + g[i];
+        const atHi = x[i] >= limit - 1e-4;
+        const atLo = x[i] <= -limit + 1e-4;
+        let inward = Math.abs(gi);
+        if (atHi && !atLo) inward = Math.max(0, gi);
+        else if (atLo && !atHi) inward = Math.max(0, -gi);
+        if (inward > violation) violation = inward;
+    }
+    return violation / Math.max(scale, 1e-12);
+}
+
+function lateApexWeights(kappa, ds) {
+    const n = kappa.length;
+    const thresh = 1 / LINE_CORNER_RADIUS_M;
+    const hot = kappa.map((k) => Math.abs(k) >= thresh);
+    const runs = [];
+    let i = 0;
+    while (i < n) {
+        if (!hot[i]) { i++; continue; }
+        let j = i;
+        while (j < n && hot[j]) j++;
+        runs.push({ s: i, e: j - 1, wrap: false });
+        i = j;
+    }
+    if (runs.length >= 2 && hot[0] && hot[n - 1]) {
+        const last = runs.pop();
+        runs[0].s = last.s;
+        runs[0].wrap = true;
+    }
+    const weight = new Array(n).fill(1);
+    const runLen = (run) => (run.wrap ? (n - run.s) + run.e + 1 : run.e - run.s + 1);
+    for (let r = 0; r < runs.length; r++) {
+        const run = runs[r];
+        const len = runLen(run);
+        const next = runs[(r + 1) % runs.length];
+        let gap = next.s - (run.e + 1);
+        if (gap < 0) gap += n;
+        const straightM = gap * ds;
+        let turn = 0;
+        for (let k = 0; k < len; k++) turn += kappa[(run.s + k) % n] * ds;
+        if (straightM < LINE_LONG_STRAIGHT_M || Math.abs(turn) < LINE_MIN_LATE_TURN_RAD) continue;
+        for (let k = 0; k < len; k++) {
+            const idx = (run.s + k) % n;
+            const along = len <= 1 ? 1 : k / (len - 1);
+            weight[idx] *= 1 + LINE_LATE_APEX_BOOST * along;
+        }
+        const tail = Math.min(gap, Math.max(1, Math.round(40 / ds)));
+        for (let k = 1; k <= tail; k++) {
+            weight[(run.e + k) % n] *= 1 + LINE_LATE_APEX_BOOST;
+        }
+    }
+    return weight;
+}
+
+// Minimise (centreline curvature + offset second derivative)^2, plus a small
+// penalty on the offset's slope. The curvature term puts a real corner
+// outside, then apex, then outside. The slope term keeps that apex from
+// being one sideways step. Literal summed squared curvature of the polyline
+// is not the objective: on a hairpin it sits on the outside and never apexes.
+function stationOffsets(kappaRaw, ds, limit) {
+    const kappa = circularSmooth(kappaRaw, 1);
+    const n = kappa.length;
+    const weight = lateApexWeights(kappa, ds);
+    const a = 1 / (ds * ds);
+    const band = emptyBand(n);
+    const g = new Float64Array(n);
+    const slope = LINE_SLOPE / ds;
+    for (let s = 0; s < n; s++) {
+        const im = (s - 1 + n) % n;
+        const ip = (s + 1) % n;
+        const idx = [im, s, ip];
+        const coef = [a, -2 * a, a];
+        const w = ds * weight[s];
+        for (let p = 0; p < 3; p++) {
+            for (let q = p; q < 3; q++) {
+                addEntry(band, idx[p], idx[q], 2 * w * coef[p] * coef[q]);
+            }
+            g[idx[p]] += 2 * w * coef[p] * kappa[s];
+        }
+        addEntry(band, s, s, 2 * slope);
+        addEntry(band, ip, ip, 2 * slope);
+        addEntry(band, s, ip, -2 * slope);
+    }
+    for (let s = 0; s < n; s++) band.d0[s] += 2 * ds * LINE_RIDGE;
+    const solved = solveBoundedOffsets(band, g, limit);
+    return { solved, violation: boundGradientViolation(band, g, solved, limit) };
+}
+
+function valueAtDistance(distance, values, target, lap) {
+    const n = values.length;
+    let d = target % lap;
+    if (d < 0) d += lap;
+    if (d <= distance[0]) return values[0];
+    if (d >= distance[n - 1]) {
+        const span = lap - distance[n - 1];
+        const t = span > 1e-9 ? (d - distance[n - 1]) / span : 0;
+        return values[n - 1] * (1 - t) + values[0] * t;
+    }
+    let lo = 0;
+    let hi = n - 1;
+    while (lo + 1 < hi) {
+        const mid = (lo + hi) >> 1;
+        if (distance[mid] <= d) lo = mid;
+        else hi = mid;
+    }
+    const span = distance[hi] - distance[lo];
+    const t = span > 1e-9 ? (d - distance[lo]) / span : 0;
+    return values[lo] * (1 - t) + values[hi] * t;
+}
+
+function minimumCurvatureOffsets(frame, limitM) {
+    const { n, cx, cy, distance, lap } = frame;
+    const kappaFine = signedCurvature(cx, cy);
+    const nSta = Math.min(n, Math.max(24, Math.round(lap / LINE_STATION_M)));
+    const ds = lap / nSta;
+    const stationKappa = new Array(nSta);
+    for (let s = 0; s < nSta; s++) {
+        stationKappa[s] = valueAtDistance(distance, kappaFine, s * ds, lap);
+    }
+    const station = stationOffsets(stationKappa, ds, limitM);
+    const solved = station.solved;
+    // Smooth the turn-in. A hairpin apex is only a couple of stations wide,
+    // so put half of that peak back — otherwise the average misses the inside.
+    const blurred = circularSmooth(solved, LINE_OFFSET_SMOOTH);
+    const stationN = blurred.map((v, i) => {
+        const prev = solved[(i - 1 + solved.length) % solved.length];
+        const next = solved[(i + 1) % solved.length];
+        const peak = Math.abs(solved[i]) >= Math.abs(prev) && Math.abs(solved[i]) >= Math.abs(next)
+            && Math.abs(solved[i]) > 0.75 * limitM;
+        const mixed = peak ? 0.7 * v + 0.3 * solved[i] : v;
+        return clamp(mixed, -limitM, limitM);
+    });
+    const offsets = new Array(n);
+    for (let i = 0; i < n; i++) {
+        let u = distance[i] / ds;
+        if (u >= nSta) u = 0;
+        const s0 = Math.floor(u) % nSta;
+        const s1 = (s0 + 1) % nSta;
+        const t = u - Math.floor(u);
+        const blend = t * t * (3 - 2 * t);
+        offsets[i] = clamp(stationN[s0] * (1 - blend) + stationN[s1] * blend, -limitM, limitM);
+    }
+    return { offsets, boundViolation: station.violation };
 }
 
 function mengerRadius(x1, y1, x2, y2, x3, y3) {
@@ -235,7 +655,8 @@ export function buildDriveProfile(points, options = {}) {
     const limitM = Math.max(0.4, car.trackWidthM / 2 - car.marginM);
     const frame = centrelineFrame(points, options.lapLengthM || 0);
     const { n, cx, cy, distance, nx, ny, lap } = frame;
-    const offsets = minimumCurvatureOffsets(frame, limitM);
+    const line = minimumCurvatureOffsets(frame, limitM);
+    const offsets = line.offsets;
     const x = new Array(n);
     const y = new Array(n);
     const z = new Array(n);
@@ -313,6 +734,7 @@ export function buildDriveProfile(points, options = {}) {
         minSpeedMps: minSpeed,
         maxSpeedMps: maxSpeed,
         maxAbsOffsetM: maxAbsOffset,
+        boundViolation: line.boundViolation,
         accelMps2: solved.aAcc,
         brakeMps2: solved.aBrk,
         samples,
