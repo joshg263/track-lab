@@ -144,16 +144,18 @@ def radii_from_curvature(curvature: np.ndarray) -> np.ndarray:
         return np.where(curvature > 1e-10, 1.0 / curvature, np.inf)
 
 
-def find_corners(
+def find_corner_runs(
     curvature: np.ndarray,
     distances: np.ndarray,
     radius_threshold_m: float = RADIUS_THRESHOLD_M,
     merge_gap_m: float = MERGE_GAP_M,
     min_run_length_m: float = MIN_RUN_LENGTH_M,
-) -> list[tuple[float, float]]:
+) -> list[dict]:
     """
     Contiguous runs with radius below threshold.
-    Returns (center_distance_m, min_radius_m) sorted by distance.
+
+    Same runs as find_corners. Each run has the sample span, the chainage of
+    the first and last sample, the centre chainage, and the minimum radius.
     """
     n = len(curvature)
     radius = radii_from_curvature(curvature)
@@ -186,7 +188,7 @@ def find_corners(
         else:
             merged.append((start, end))
 
-    corners: list[tuple[float, float]] = []
+    corners: list[dict] = []
     for start, end in merged:
         run_length = distances[end] - distances[start]
         if run_length < min_run_length_m:
@@ -199,10 +201,40 @@ def find_corners(
 
         min_radius = float(np.min(valid))
         center_dist = float((distances[start] + distances[end]) / 2)
-        corners.append((center_dist, min_radius))
+        corners.append({
+            "start_index": int(start),
+            "end_index": int(end),
+            "start_m": float(distances[start]),
+            "end_m": float(distances[end]),
+            "position_m": center_dist,
+            "radius_m": min_radius,
+        })
 
-    corners.sort(key=lambda x: x[0])
+    corners.sort(key=lambda r: r["position_m"])
     return corners
+
+
+def find_corners(
+    curvature: np.ndarray,
+    distances: np.ndarray,
+    radius_threshold_m: float = RADIUS_THRESHOLD_M,
+    merge_gap_m: float = MERGE_GAP_M,
+    min_run_length_m: float = MIN_RUN_LENGTH_M,
+) -> list[tuple[float, float]]:
+    """
+    Contiguous runs with radius below threshold.
+    Returns (center_distance_m, min_radius_m) sorted by distance.
+    """
+    return [
+        (run["position_m"], run["radius_m"])
+        for run in find_corner_runs(
+            curvature,
+            distances,
+            radius_threshold_m=radius_threshold_m,
+            merge_gap_m=merge_gap_m,
+            min_run_length_m=min_run_length_m,
+        )
+    ]
 
 
 def find_corners_dict(
@@ -243,7 +275,8 @@ def analyze_corners_xy(
     finite = radius[np.isfinite(radius) & (radius < np.inf)]
     min_radius_m = float(np.min(finite)) if len(finite) else None
 
-    corners = find_corners(curvature, dist_r)
+    runs = find_corner_runs(curvature, dist_r)
+    corners = [(run["position_m"], run["radius_m"]) for run in runs]
     corner_radii = [r for _, r in corners]
     min_corner_radius_m = min(corner_radii) if corner_radii else None
 
@@ -253,6 +286,7 @@ def analyze_corners_xy(
         "curvature": curvature,
         "radius": radius,
         "corners": corners,
+        "runs": runs,
         "corners_dict": [
             {"position_m": round(d, 1), "radius_m": round(r, 1)} for d, r in corners
         ],
