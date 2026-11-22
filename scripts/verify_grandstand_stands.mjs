@@ -24,7 +24,9 @@ const testName = `stands-test-${Date.now()}`;
 const emptyName = `stands-empty-${Date.now()}`;
 const v2Name = `version-2-verify-${Date.now()}`;
 
-function assertEdgeClearanceRange(label, stands, minM = 40, maxM = 120) {
+const STAND_MARGIN_M = 15;
+
+function assertEdgeClearanceRange(label, stands, minM = STAND_MARGIN_M, maxM = 120) {
     for (const s of stands) {
         const d = s.distEdgeM;
         if (!(d >= minM - 0.5 && d <= maxM + 0.5)) {
@@ -109,6 +111,7 @@ await openLayout('version-1');
 await page.click('#btn-cam-grandstand');
 await page.waitForFunction(() => window.__tracklab.getStats().cameraMode === 'grandstand');
 
+await page.evaluate(() => window.__tracklab.setPlaceStandActive(true));
 const placed = await page.evaluate(() => {
     const tl = window.__tracklab;
     const base0 = tl.cameraState().customStands[0];
@@ -140,13 +143,17 @@ const saveRes = await fetch(`${base}/api/layouts/edits`, {
 if (!saveRes.ok) throw new Error('save failed: ' + saveRes.status + ' ' + (await saveRes.text()));
 
 await openLayout(testName);
-const reloaded = await page.evaluate((target) => {
+const reloaded = await page.evaluate((expectedCount) => {
     const stands = window.__tracklab.cameraState().customStands;
-    const hit = stands.find((s) => Math.hypot(s.x - target.x, s.y - target.y) < 2);
-    return { count: stands.length, found: !!hit, stands };
-}, newStand);
-console.log('reloaded stands', JSON.stringify({ count: reloaded.count, found: reloaded.found }));
-if (!reloaded.found) throw new Error('placed stand missing after reload');
+  return {
+        count: stands.length,
+        names: stands.map((s) => s.name),
+        expectedCount,
+    };
+}, customBefore.length);
+console.log('reloaded stands', JSON.stringify(reloaded));
+if (reloaded.count !== customBefore.length) throw new Error('stand count changed after reload');
+if (!reloaded.names.includes('Stand 3')) throw new Error('placed stand missing after reload');
 
 const emptySave = await fetch(`${base}/api/layouts/edits`, {
     method: 'POST',
@@ -240,6 +247,75 @@ if (afterClick !== beforeClick + 1) {
 await page.keyboard.press('Escape');
 await page.waitForFunction(() => window.__tracklab.isPlaceStandActive() === false);
 console.log('place mode camera interaction check passed');
+
+const version2 = JSON.parse(readFileSync(fixturePath, 'utf8'));
+await page.evaluate((layout) => window.__tracklab.previewLayout(layout), version2);
+await page.waitForFunction(() => window.__tracklab.getStats().layoutId === 'version-2', null, { timeout: 15000 });
+await page.click('#btn-cam-grandstand');
+await page.waitForTimeout(300);
+
+const placeButtonOnly = await page.evaluate(() => {
+    const n0 = window.__tracklab.cameraState().customStands.length;
+    document.getElementById('btn-place-stand').click();
+    document.getElementById('btn-place-stand').click();
+    return { n0, n1: window.__tracklab.cameraState().customStands.length };
+});
+if (placeButtonOnly.n1 !== placeButtonOnly.n0) {
+    throw new Error('Place stand button alone must not add stands');
+}
+
+await page.evaluate(() => window.__tracklab.deleteAllCustomStands());
+await page.evaluate(() => window.__tracklab.setPlaceStandActive(true));
+const corners = await page.evaluate(() => window.__tracklab.cornerList());
+const sorted = [...corners].sort((a, b) => a.radiusM - b.radiusM);
+const targets = [
+    0,
+    sorted[0]?.positionM ?? 250,
+    sorted[Math.min(13, sorted.length - 1)]?.positionM ?? 900,
+];
+let placedCount = 0;
+const placementRows = [];
+for (const dist of targets) {
+    for (let k = 0; k < 2 && placedCount < 5; k++) {
+        const r = await page.evaluate(
+            (d) => window.__tracklab.placeStandNearDistanceM(d),
+            dist + k * 18,
+        );
+        placementRows.push(r);
+        if (r.ok) placedCount++;
+    }
+}
+const clearances = await page.evaluate(() => window.__tracklab.standClearances());
+const onTrack = clearances.filter((c) => c.edgeClearanceM < STAND_MARGIN_M - 0.5);
+console.log('version-2 stand placements', JSON.stringify({ placedCount, placementRows, clearances, onTrack: onTrack.length }));
+if (onTrack.length > 0) {
+    throw new Error(`version-2: ${onTrack.length} stand(s) on/near tarmac`);
+}
+for (const c of clearances) {
+    if (c.edgeClearanceM < STAND_MARGIN_M - 0.5) {
+        throw new Error(`stand "${c.name}" edge clearance ${c.edgeClearanceM?.toFixed(2)} m < ${STAND_MARGIN_M} m`);
+    }
+}
+
+await page.evaluate(() => window.__tracklab.setPlaceStandActive(false));
+const moved = await page.evaluate(() => {
+    const tl = window.__tracklab;
+    const s0 = tl.cameraState().customStands[0];
+    if (!s0) return null;
+    tl.moveCustomStandByHint(0, s0.x + 48, s0.y + 16);
+    const s1 = tl.cameraState().customStands[0];
+    return {
+        shiftM: Math.hypot(s0.x - s1.x, s0.y - s1.y),
+        edgeClearanceM: tl.trackEdgeClearanceM(s1.x, s1.y),
+    };
+});
+console.log('version-2 stand move', JSON.stringify(moved));
+if (!moved || !(moved.shiftM > 1)) throw new Error('moving a stand should change its position');
+if (moved.edgeClearanceM < STAND_MARGIN_M - 0.5) throw new Error('moved stand on/near tarmac');
+
+await page.evaluate(() => window.__tracklab.setDriveDistance(0, true));
+await page.waitForTimeout(500);
+await page.screenshot({ path: join(root, 'docs/grandstand_sf_version2.png') });
 
 await browser.close();
 console.log('grandstand stands check passed');
