@@ -252,7 +252,39 @@ const version2 = JSON.parse(readFileSync(fixturePath, 'utf8'));
 await page.evaluate((layout) => window.__tracklab.previewLayout(layout), version2);
 await page.waitForFunction(() => window.__tracklab.getStats().layoutId === 'version-2', null, { timeout: 15000 });
 await page.click('#btn-cam-grandstand');
+await page.waitForFunction(() => window.__tracklab.getStats().cameraMode === 'grandstand');
 await page.waitForTimeout(300);
+
+const grandstandEntry = await page.evaluate(() => ({
+    seat: window.__tracklab.isStandSeatView(),
+    listSel: window.__tracklab.listSelectionIndex(),
+    controls: window.__tracklab.controlsEnabled(),
+    cam: window.__tracklab.cameraPosition(),
+    customCount: window.__tracklab.cameraState().customStands.length,
+    markerCount: window.__tracklab.cameraState().customStands.length,
+}));
+console.log('version-2 grandstand entry', JSON.stringify(grandstandEntry));
+if (grandstandEntry.seat) throw new Error('Grandstand entry must not start in seat view');
+if (grandstandEntry.listSel !== -1) throw new Error('Grandstand entry must select no stand');
+if (!grandstandEntry.controls) throw new Error('Grandstand entry must keep orbit controls enabled');
+if (!(grandstandEntry.cam?.y > 80)) {
+    throw new Error('Grandstand entry camera should be overhead (high Y)');
+}
+
+const canvasV2 = await page.$('#canvas-container canvas');
+const boxV2 = await canvasV2.boundingBox();
+const orbitFrom = { x: boxV2.x + boxV2.width * 0.72, y: boxV2.y + boxV2.height * 0.38 };
+await page.mouse.move(orbitFrom.x, orbitFrom.y);
+await page.mouse.down();
+await page.mouse.move(orbitFrom.x + 95, orbitFrom.y + 55, { steps: 10 });
+await page.mouse.up();
+await page.waitForTimeout(150);
+const orbitShift = await page.evaluate((cam0) => {
+    const cam1 = window.__tracklab.cameraPosition();
+    return Math.hypot(cam1.x - cam0.x, cam1.y - cam0.y, cam1.z - cam0.z);
+}, grandstandEntry.cam);
+console.log('version-2 overhead canvas drag shift', orbitShift.toFixed(2));
+if (!(orbitShift > 2)) throw new Error('empty canvas drag in Grandstand should move the camera');
 
 const placeButtonOnly = await page.evaluate(() => {
     const n0 = window.__tracklab.cameraState().customStands.length;
@@ -298,23 +330,119 @@ for (const c of clearances) {
 }
 
 await page.evaluate(() => window.__tracklab.setPlaceStandActive(false));
-const moved = await page.evaluate(() => {
-    const tl = window.__tracklab;
-    const s0 = tl.cameraState().customStands[0];
-    if (!s0) return null;
-    tl.moveCustomStandByHint(0, s0.x + 48, s0.y + 16);
-    const s1 = tl.cameraState().customStands[0];
-    return {
-        shiftM: Math.hypot(s0.x - s1.x, s0.y - s1.y),
-        edgeClearanceM: tl.trackEdgeClearanceM(s1.x, s1.y),
-    };
-});
-console.log('version-2 stand move', JSON.stringify(moved));
-if (!moved || !(moved.shiftM > 1)) throw new Error('moving a stand should change its position');
-if (moved.edgeClearanceM < STAND_MARGIN_M - 0.5) throw new Error('moved stand on/near tarmac');
 
-await page.evaluate(() => window.__tracklab.setDriveDistance(0, true));
-await page.waitForTimeout(500);
+const moveStart = await page.evaluate(() => {
+    const tl = window.__tracklab;
+    const n = tl.cameraState().customStands.length;
+    const cam = tl.cameraPosition();
+    for (let i = 0; i < n; i++) {
+        const screen = tl.standMarkerScreen(i);
+        if (!screen) continue;
+        if (tl.pickStandMarkerAt(screen.x, screen.y) !== i) continue;
+        return { index: i, s0: tl.cameraState().customStands[i], screen, cam };
+    }
+    return null;
+});
+if (!moveStart?.s0 || !moveStart?.screen) {
+    throw new Error('no stand marker on screen with a reliable hit target for drag move');
+}
+const dragDx = 70;
+const dragDy = 42;
+const sx = Math.round(moveStart.screen.x);
+const sy = Math.round(moveStart.screen.y);
+await page.evaluate(
+    ({ x, y, dx, dy }) => {
+        const canvas = document.querySelector('#canvas-container canvas');
+        const path = [
+            ['pointerdown', x, y, 1],
+            ['pointermove', x + dx * 0.35, y + dy * 0.35, 1],
+            ['pointermove', x + dx, y + dy, 1],
+            ['pointerup', x + dx, y + dy, 0],
+        ];
+        for (const [type, cx, cy, buttons] of path) {
+            canvas.dispatchEvent(
+                new PointerEvent(type, {
+                    clientX: cx,
+                    clientY: cy,
+                    pointerId: 41,
+                    isPrimary: true,
+                    button: 0,
+                    buttons,
+                    bubbles: true,
+                    cancelable: true,
+                }),
+            );
+        }
+    },
+    { x: sx, y: sy, dx: dragDx, dy: dragDy },
+);
+await page.waitForTimeout(200);
+const moved = await page.evaluate((before) => {
+    const tl = window.__tracklab;
+    const s1 = tl.cameraState().customStands[before.index];
+    return {
+        shiftM: Math.hypot(before.x - s1.x, before.y - s1.y),
+        edgeClearanceM: tl.trackEdgeClearanceM(s1.x, s1.y),
+        camShift: Math.hypot(
+            tl.cameraPosition().x - before.camX,
+            tl.cameraPosition().y - before.camY,
+            tl.cameraPosition().z - before.camZ,
+        ),
+    };
+}, {
+    ...moveStart.s0,
+    index: moveStart.index,
+    camX: moveStart.cam.x,
+    camY: moveStart.cam.y,
+    camZ: moveStart.cam.z,
+});
+console.log('version-2 stand marker drag move', JSON.stringify(moved));
+if (!(moved.shiftM > 1)) throw new Error('pointer drag on stand marker should move the stand');
+if (moved.edgeClearanceM < STAND_MARGIN_M - 0.5) throw new Error('moved stand on/near tarmac');
+if (moved.camShift > 35) throw new Error('moving a stand should not move the overhead camera');
+
+await page.click('#stand-list button:first-child');
+await page.waitForFunction(() => window.__tracklab.listSelectionIndex() >= 0);
+await page.click('#btn-view-stand');
+await page.waitForFunction(() => window.__tracklab.isStandSeatView());
+const seatEnter = await page.evaluate(() => ({
+    seat: window.__tracklab.isStandSeatView(),
+    controls: window.__tracklab.controlsEnabled(),
+    cam: window.__tracklab.cameraPosition(),
+}));
+console.log('version-2 seat enter', JSON.stringify(seatEnter));
+if (!seatEnter.seat || !seatEnter.controls) throw new Error('seat view must enable controls');
+
+const seatCam0 = seatEnter.cam;
+const seatDragOrigin = { x: boxV2.x + boxV2.width * 0.5, y: boxV2.y + boxV2.height * 0.45 };
+await page.mouse.move(seatDragOrigin.x, seatDragOrigin.y);
+await page.mouse.down();
+await page.mouse.move(seatDragOrigin.x + 110, seatDragOrigin.y - 40, { steps: 10 });
+await page.mouse.up();
+await page.waitForTimeout(150);
+const seatRotate = await page.evaluate((c0) => {
+    const c1 = window.__tracklab.cameraPosition();
+    return Math.hypot(c1.x - c0.x, c1.y - c0.y, c1.z - c0.z);
+}, seatCam0);
+console.log('version-2 seat view drag shift', seatRotate.toFixed(2));
+if (!(seatRotate > 0.5)) throw new Error('drag in seat view should rotate / move the camera');
+
+await page.keyboard.press('Escape');
+await page.waitForFunction(() => !window.__tracklab.isStandSeatView());
+const afterEsc = await page.evaluate(() => ({
+    seat: window.__tracklab.isStandSeatView(),
+    controls: window.__tracklab.controlsEnabled(),
+    listSel: window.__tracklab.listSelectionIndex(),
+}));
+console.log('version-2 Esc overhead', JSON.stringify(afterEsc));
+if (afterEsc.seat) throw new Error('Esc should return to overhead Grandstand');
+if (!afterEsc.controls) throw new Error('overhead Grandstand must keep controls enabled');
+
+await page.click('#btn-cam-grandstand');
+await page.waitForFunction(
+    () => !window.__tracklab.isStandSeatView() && window.__tracklab.controlsEnabled(),
+);
+await page.waitForTimeout(400);
 await page.screenshot({ path: join(root, 'docs/grandstand_sf_version2.png') });
 
 await browser.close();

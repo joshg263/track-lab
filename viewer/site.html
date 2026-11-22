@@ -268,6 +268,7 @@
             <div id="stand-list"></div>
             <div id="stand-tools">
                 <button id="btn-place-stand" type="button" class="secondary">Place stand</button>
+                <button id="btn-view-stand" type="button" class="secondary" disabled>View from stand</button>
                 <button id="btn-delete-stand" type="button" class="secondary" disabled>Delete stand</button>
                 <div id="stand-place-hint">Click to place · drag to look around · Esc to exit</div>
                 <div id="stand-status"></div>
@@ -442,6 +443,9 @@
         let sampleZ = () => 0;
         let cameraMode = 'orbit';
         let grandstandIndex = 0;
+        let listSelectionIndex = -1;
+        let standSeatView = false;
+        let seatStandIndex = -1;
         let driveDistance = 0;
         let drivePlaying = false;
         let driveSpeedMul = 1;
@@ -1713,8 +1717,86 @@
                 return;
             }
             if (cameraMode === 'grandstand') {
-                controls.enabled = placeStandActive && !standDragging;
+                controls.enabled = !standDragging;
             }
+        }
+
+        function frameStandOverhead() {
+            if (!layoutPoints?.length || !camera || !controls) return;
+            let minX = Infinity;
+            let maxX = -Infinity;
+            let minY = Infinity;
+            let maxY = -Infinity;
+            const grow = (x, y) => {
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+            };
+            for (const p of layoutPoints) grow(p.x, p.y);
+            for (const s of customStands) grow(s.x, s.y);
+            const cx = (minX + maxX) / 2;
+            const cz = -((minY + maxY) / 2);
+            const size = Math.max(maxX - minX, maxY - minY, 200);
+            const dist = size * 0.92;
+            camera.position.set(cx + dist * 0.1, dist * 0.78, cz + dist * 0.42);
+            controls.target.set(cx, 0, cz);
+            controls.update();
+        }
+
+        function standSeatLookTarget() {
+            const car = layoutPoints ? onboardStation(driveDistance) : null;
+            const ahead = layoutPoints ? onboardStation(driveDistance + 120) : null;
+            if (car && ahead) {
+                return new THREE.Vector3(
+                    car.sceneX * 0.65 + ahead.sceneX * 0.35,
+                    car.sceneY * 0.65 + ahead.sceneY * 0.35,
+                    car.sceneZ * 0.65 + ahead.sceneZ * 0.35,
+                );
+            }
+            if (car) return new THREE.Vector3(car.sceneX, car.sceneY, car.sceneZ);
+            return controls?.target?.clone() || new THREE.Vector3();
+        }
+
+        function enterStandSeatView(index) {
+            const stand = driveStands[index];
+            if (!stand || !camera || !controls) return;
+            standSeatView = true;
+            seatStandIndex = index;
+            placeStandActive = false;
+            placePointer = null;
+            camera.up.set(0, 1, 0);
+            camera.position.set(stand.x, sceneY(stand.eyeElev), -stand.y);
+            controls.target.copy(standSeatLookTarget());
+            controls.enabled = true;
+            controls.update();
+            rebuildStandMarkers();
+            updateStandModeBanner();
+            updateCameraModeUi();
+        }
+
+        function exitStandSeatView() {
+            if (!standSeatView) return;
+            standSeatView = false;
+            seatStandIndex = -1;
+            frameStandOverhead();
+            syncStandControlsEnabled();
+            rebuildStandMarkers();
+            updateStandModeBanner();
+            updateCameraModeUi();
+        }
+
+        function enterGrandstandLayout() {
+            standSeatView = false;
+            seatStandIndex = -1;
+            selectedCustomStand = -1;
+            listSelectionIndex = -1;
+            placePointer = null;
+            frameStandOverhead();
+            syncStandControlsEnabled();
+            updateCarMarker();
+            rebuildStandMarkers();
+            updateStandModeBanner();
         }
 
         function onPointerDown(e) {
@@ -1725,7 +1807,7 @@
                     const idx = pickStandMarker(e.clientX, e.clientY);
                     if (idx >= 0) {
                         selectedCustomStand = idx;
-                        grandstandIndex = idx;
+                        listSelectionIndex = idx;
                         standDragging = true;
                         standDragIndex = idx;
                         standDragMoved = false;
@@ -1736,6 +1818,7 @@
                         rebuildStandMarkers();
                         updateStandModeBanner();
                         e.preventDefault();
+                        e.stopPropagation();
                         return;
                     }
                     selectedCustomStand = -1;
@@ -1778,6 +1861,8 @@
 
         function onPointerMove(e) {
             if (standDragging && e.pointerId === standDragPointerId) {
+                e.preventDefault();
+                e.stopPropagation();
                 const g = groundAt(e.clientX, e.clientY);
                 if (!g) return;
                 if (moveCustomStand(standDragIndex, g.x, g.y, true)) {
@@ -1815,26 +1900,9 @@
         }
 
         function syncPlaceStandControls() {
-            if (!controls) return;
-            const placing = placeStandActive && cameraMode === 'grandstand';
-            if (!placing) {
-                if (cameraMode === 'grandstand') controls.enabled = false;
-                return;
-            }
-            applyGrandstand(driveDistance);
-            const car = layoutPoints ? onboardStation(driveDistance) : null;
-            const ahead = layoutPoints ? onboardStation(driveDistance + 120) : null;
-            if (car && ahead) {
-                controls.target.set(
-                    car.sceneX * 0.65 + ahead.sceneX * 0.35,
-                    car.sceneY * 0.65 + ahead.sceneY * 0.35,
-                    car.sceneZ * 0.65 + ahead.sceneZ * 0.35,
-                );
-            } else if (car) {
-                controls.target.set(car.sceneX, car.sceneY, car.sceneZ);
-            }
-            controls.enabled = true;
-            controls.update();
+            if (!placeStandActive || cameraMode !== 'grandstand') return;
+            if (standSeatView) exitStandSeatView();
+            syncStandControlsEnabled();
         }
 
         function setPlaceStandActive(on) {
@@ -1846,13 +1914,11 @@
             placePointer = null;
             if (placeStandActive) {
                 selectedCustomStand = -1;
+                listSelectionIndex = -1;
                 standDragging = false;
+                if (standSeatView) exitStandSeatView();
             }
-            if (placeStandActive) syncPlaceStandControls();
-            else if (controls && cameraMode === 'grandstand') {
-                controls.enabled = false;
-                applyGrandstand(driveDistance);
-            }
+            syncPlaceStandControls();
             setStandStatus('');
             updateCameraModeUi();
         }
@@ -2111,7 +2177,7 @@
             carMarker.rotation.set(0, Math.atan2(fwd.x, fwd.z), 0);
             // The onboard camera is the driver's eye, a few centimetres above this roof.
             carMarker.visible = cameraMode !== 'onboard';
-            if (carBeacon) carBeacon.visible = cameraMode === 'grandstand';
+            if (carBeacon) carBeacon.visible = cameraMode === 'grandstand' && standSeatView;
             if (cameraMode === 'orbit' && camera && controls) {
                 const dist = Math.max(80, camera.position.distanceTo(controls.target));
                 carMarker.scale.setScalar(THREE.MathUtils.clamp(dist / 280, 5, 16));
@@ -2221,7 +2287,7 @@
         function applyDriveCamera(dt) {
             if (!camera) return;
             if (cameraMode === 'onboard') applyOnboard(driveDistance, dt);
-            else if (cameraMode === 'grandstand') applyGrandstand(driveDistance);
+            else if (cameraMode === 'grandstand' && standSeatView) applyGrandstand(driveDistance);
             else if (cameraMode === 'helicopter') applyHelicopter(driveDistance, dt);
         }
 
@@ -2335,7 +2401,10 @@
                 if (banner) banner.style.display = 'none';
                 return;
             }
-            if (placeStandActive) {
+            if (standSeatView) {
+                banner.textContent = 'Seat view: drag to look around · Esc returns to overhead';
+                banner.style.display = 'block';
+            } else if (placeStandActive) {
                 banner.textContent = 'Placing: click beside the track · drag to look · Esc to stop';
                 banner.style.display = 'block';
             } else if (standDragging) {
@@ -2422,7 +2491,7 @@
                 child.geometry?.dispose();
                 child.material?.dispose();
             }
-            const show = cameraMode === 'grandstand' && !placeStandActive;
+            const show = cameraMode === 'grandstand' && !standSeatView;
             standMarkerGroup.visible = show && customStands.length > 0;
             if (!show) return;
             customStands.forEach((s, i) => {
@@ -2446,7 +2515,7 @@
             if (!standMarkerGroup?.visible || !standMarkerGroup.children.length) return -1;
             const rect = renderer.domElement.getBoundingClientRect();
             let best = -1;
-            let bestD = 42;
+            let bestD = 56;
             const v = new THREE.Vector3();
             for (const mesh of standMarkerGroup.children) {
                 mesh.getWorldPosition(v);
@@ -2562,15 +2631,17 @@
                 const btn = document.createElement('button');
                 btn.type = 'button';
                 btn.textContent = stand.name;
-                btn.className = cameraMode === 'grandstand' && i === grandstandIndex ? 'active' : 'secondary';
-                btn.addEventListener('click', () => showStand(i));
+                const selected = cameraMode === 'grandstand' && i === listSelectionIndex;
+                btn.className = selected ? 'active' : 'secondary';
+                btn.addEventListener('click', () => selectStandInList(i));
                 list.appendChild(btn);
             });
             const del = document.getElementById('btn-delete-stand');
+            const viewBtn = document.getElementById('btn-view-stand');
             const place = document.getElementById('btn-place-stand');
-            const delIdx = selectedCustomStand >= 0 ? selectedCustomStand
-                : (grandstandIndex < customStands.length ? grandstandIndex : -1);
+            const delIdx = selectedCustomStand >= 0 ? selectedCustomStand : -1;
             if (del) del.disabled = delIdx < 0 || customStands.length === 0;
+            if (viewBtn) viewBtn.disabled = listSelectionIndex < 0;
             if (place) {
                 place.disabled = customStands.length >= 4;
                 place.classList.toggle('active', placeStandActive);
@@ -2591,7 +2662,6 @@
             s.faceY = snap.faceY;
             if (!live) setStandStatus('');
             rebuildDriveStands();
-            if (!standDragging && cameraMode === 'grandstand' && !placeStandActive) applyDriveCamera(null);
             return true;
         }
 
@@ -2617,16 +2687,14 @@
                 faceY: snap.faceY,
             });
             selectedCustomStand = idx;
-            grandstandIndex = idx;
+            listSelectionIndex = idx;
             setStandStatus('');
             rebuildDriveStands();
-            if (cameraMode === 'grandstand' && !placeStandActive) applyDriveCamera(null);
             return true;
         }
 
         function deleteSelectedStand() {
-            const idx = selectedCustomStand >= 0 ? selectedCustomStand
-                : (grandstandIndex < customStands.length ? grandstandIndex : -1);
+            const idx = selectedCustomStand >= 0 ? selectedCustomStand : -1;
             if (idx < 0 || idx >= customStands.length) return;
             customStands.splice(idx, 1);
             customStands.forEach((s, i) => {
@@ -2634,11 +2702,8 @@
                 if (/^Stand \d+$/.test(s.name)) s.name = `Stand ${i + 1}`;
             });
             selectedCustomStand = -1;
-            if (grandstandIndex >= customStands.length) {
-                grandstandIndex = Math.max(0, customStands.length - 1);
-            }
+            listSelectionIndex = -1;
             rebuildDriveStands();
-            if (cameraMode === 'grandstand' && !placeStandActive) applyDriveCamera(null);
         }
 
         function nearestTrackDistanceM(x, y) {
@@ -2775,7 +2840,7 @@
             driveDistance = d;
             if (snapLook) lookReady = false;
             updateCarMarker();
-            if (cameraMode !== 'orbit') applyDriveCamera(null);
+            if (cameraMode !== 'orbit' && cameraMode !== 'grandstand') applyDriveCamera(null);
             syncDriveUi();
         }
 
@@ -2787,7 +2852,7 @@
                 return;
             }
             updateCarMarker();
-            if (cameraMode !== 'orbit') {
+            if (cameraMode !== 'orbit' && cameraMode !== 'grandstand') {
                 lookReady = false;
                 applyDriveCamera(null);
             }
@@ -2847,7 +2912,7 @@
             }
             const wasOrbit = cameraMode === 'orbit';
             cameraMode = mode;
-            if (controls) controls.enabled = false;
+            if (controls) controls.enabled = mode === 'grandstand';
             camera.fov = mode === 'onboard' ? ONBOARD_FOV : mode === 'grandstand' ? grandstandFov : 55;
             camera.near = mode === 'onboard' ? 0.2 : 0.4;
             camera.updateProjectionMatrix();
@@ -2863,20 +2928,27 @@
             setViewpointVisible(false);
             syncLabelVisibility();
             updateCarMarker();
-            applyDriveCamera(null);
+            if (mode === 'grandstand') {
+                enterGrandstandLayout();
+            } else {
+                standSeatView = false;
+                seatStandIndex = -1;
+                if (controls) controls.enabled = false;
+                applyDriveCamera(null);
+            }
             updateCameraModeUi();
             syncDriveUi();
             if (renderer) renderer.shadowMap.needsUpdate = true;
         }
 
-        function showStand(index) {
+        function selectStandInList(index) {
             if (!driveStands[index]) return;
-            grandstandIndex = index;
+            listSelectionIndex = index;
             selectedCustomStand = index < customStands.length ? index : -1;
             if (cameraMode !== 'grandstand') setCameraMode('grandstand');
-            else if (placeStandActive) syncPlaceStandControls();
             else {
-                applyDriveCamera(null);
+                rebuildStandMarkers();
+                updateStandModeBanner();
                 updateCameraModeUi();
             }
         }
@@ -3129,11 +3201,41 @@
                     customStands = [];
                     grandstandIndex = 0;
                     rebuildDriveStands();
-                    if (cameraMode === 'grandstand') applyDriveCamera(null);
+                    if (cameraMode === 'grandstand') enterGrandstandLayout();
                 },
                 setPlaceStandActive,
                 isPlaceStandActive() {
                     return placeStandActive;
+                },
+                isStandSeatView() {
+                    return standSeatView;
+                },
+                listSelectionIndex() {
+                    return listSelectionIndex;
+                },
+                enterStandSeatView,
+                exitStandSeatView,
+                controlsEnabled() {
+                    return !!controls?.enabled;
+                },
+                pickStandMarkerAt(clientX, clientY) {
+                    return pickStandMarker(clientX, clientY);
+                },
+                standMarkerScreen(index) {
+                    if (!standMarkerGroup?.visible || !camera) return null;
+                    const mesh = standMarkerGroup.children.find(
+                        (c) => c.userData?.standIndex === index,
+                    );
+                    if (!mesh) return null;
+                    const rect = renderer.domElement.getBoundingClientRect();
+                    const v = new THREE.Vector3();
+                    mesh.getWorldPosition(v);
+                    v.project(camera);
+                    if (v.z > 1) return null;
+                    return {
+                        x: rect.left + (v.x * 0.5 + 0.5) * rect.width,
+                        y: rect.top + (-v.y * 0.5 + 0.5) * rect.height,
+                    };
                 },
                 cameraPosition() {
                     if (!camera) return null;
@@ -3232,6 +3334,11 @@
                     }
                     return;
                 }
+                if (e.key === 'Escape' && cameraMode === 'grandstand' && standSeatView) {
+                    e.preventDefault();
+                    exitStandSeatView();
+                    return;
+                }
                 if (e.key === 'Escape' && placeStandActive) {
                     e.preventDefault();
                     setPlaceStandActive(false);
@@ -3286,12 +3393,13 @@
             document.getElementById('btn-cam-onboard').addEventListener('click', () => setCameraMode('onboard'));
             document.getElementById('btn-cam-helicopter').addEventListener('click', () => setCameraMode('helicopter'));
             document.getElementById('btn-cam-grandstand').addEventListener('click', () => {
-                if (cameraMode === 'grandstand' && driveStands.length > 1) {
-                    showStand((grandstandIndex + 1) % driveStands.length);
-                } else {
-                    grandstandIndex = 0;
-                    setCameraMode('grandstand');
-                }
+                if (cameraMode === 'grandstand' && standSeatView) exitStandSeatView();
+                setCameraMode('grandstand');
+            });
+            document.getElementById('btn-view-stand').addEventListener('click', () => {
+                if (listSelectionIndex < 0) return;
+                if (cameraMode !== 'grandstand') setCameraMode('grandstand');
+                enterStandSeatView(listSelectionIndex);
             });
             document.getElementById('btn-place-stand').addEventListener('click', () => {
                 if (cameraMode !== 'grandstand') setCameraMode('grandstand');
@@ -3347,7 +3455,10 @@
                 }
             }
             updateCarMarker();
-            if (cameraMode === 'orbit' || (cameraMode === 'grandstand' && placeStandActive && !standDragging)) {
+            if (cameraMode === 'orbit' || cameraMode === 'grandstand') {
+                if (cameraMode === 'grandstand' && standSeatView && controls && !standDragging) {
+                    controls.target.copy(standSeatLookTarget());
+                }
                 controls.update();
             } else {
                 applyDriveCamera(drivePlaying ? dt : null);
