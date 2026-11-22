@@ -26,25 +26,35 @@ const v2Name = `version-2-verify-${Date.now()}`;
 
 const STAND_MARGIN_M = 15;
 
-function assertEdgeClearanceRange(label, stands, minM = STAND_MARGIN_M, maxM = 120) {
-    for (const s of stands) {
-        const d = s.distEdgeM;
-        if (!(d >= minM - 0.5 && d <= maxM + 0.5)) {
+async function footprintReportOnPage(page) {
+    return page.evaluate(() => {
+        const tl = window.__tracklab;
+        const rows = tl.standFootprintClearances();
+        const min = tl.layoutMinFootprintClearanceM();
+        return { rows, minClearanceM: min };
+    });
+}
+
+function assertFootprints(label, report) {
+    console.log(
+        `${label} footprint min clearance ${report.minClearanceM?.toFixed?.(3) ?? 'n/a'} m`,
+        JSON.stringify(report.rows),
+    );
+    for (const r of report.rows) {
+        if (r.overlapsRoad) {
+            throw new Error(`${label}: stand "${r.name}" footprint overlaps road`);
+        }
+        if (r.footprintClearanceM == null || r.footprintClearanceM < STAND_MARGIN_M - 0.35) {
             throw new Error(
-                `${label}: stand "${s.name}" outside-edge clearance ${d.toFixed(1)} m, want ${minM}–${maxM}`,
+                `${label}: stand "${r.name}" footprint clearance `
+                    + `${r.footprintClearanceM?.toFixed(2) ?? 'n/a'} m < ${STAND_MARGIN_M} m`,
             );
         }
     }
 }
 
 async function defaultStandsOnPage(page) {
-    return page.evaluate(() => {
-        const tl = window.__tracklab;
-        return tl.cameraState().customStands.map((s) => ({
-            name: s.name,
-            distEdgeM: tl.trackEdgeClearanceM(s.x, s.y),
-        }));
-    });
+    return footprintReportOnPage(page);
 }
 
 const nanRes = await fetch(`${base}/api/layouts/edits`, {
@@ -81,13 +91,14 @@ async function openLayout(layout) {
 
 async function checkDefaults(layout) {
     await openLayout(layout);
-    const defaults = await defaultStandsOnPage(page);
-    console.log(`${layout} default stands`, JSON.stringify(defaults));
-    if (defaults.length < 2) throw new Error(`${layout}: expected 2 default stands`);
-    if (/best/i.test(defaults[0]?.name || '')) {
+    await page.click('#btn-cam-grandstand');
+    await page.waitForTimeout(250);
+    const report = await defaultStandsOnPage(page);
+    if (report.rows.length < 2) throw new Error(`${layout}: expected 2 default stands`);
+    if (/best/i.test(report.rows[0]?.name || '')) {
         throw new Error(`${layout}: first stand should be track-side, not best viewpoint`);
     }
-    assertEdgeClearanceRange(layout, defaults);
+    assertFootprints(layout, report);
 }
 
 await checkDefaults('layout_a_straight_hairpin');
@@ -264,6 +275,8 @@ const grandstandEntry = await page.evaluate(() => ({
     markerCount: window.__tracklab.cameraState().customStands.length,
 }));
 console.log('version-2 grandstand entry', JSON.stringify(grandstandEntry));
+const v2PreviewDefaults = await footprintReportOnPage(page);
+assertFootprints('version-2 preview defaults', v2PreviewDefaults);
 if (grandstandEntry.seat) throw new Error('Grandstand entry must not start in seat view');
 if (grandstandEntry.listSel !== -1) throw new Error('Grandstand entry must select no stand');
 if (!grandstandEntry.controls) throw new Error('Grandstand entry must keep orbit controls enabled');
@@ -297,37 +310,35 @@ if (placeButtonOnly.n1 !== placeButtonOnly.n0) {
 }
 
 await page.evaluate(() => window.__tracklab.deleteAllCustomStands());
-await page.evaluate(() => window.__tracklab.setPlaceStandActive(true));
+await page.click('#btn-place-stand');
+await page.waitForFunction(() => window.__tracklab.isPlaceStandActive());
 const corners = await page.evaluate(() => window.__tracklab.cornerList());
 const sorted = [...corners].sort((a, b) => a.radiusM - b.radiusM);
-const targets = [
-    0,
-    sorted[0]?.positionM ?? 250,
-    sorted[Math.min(13, sorted.length - 1)]?.positionM ?? 900,
-];
-let placedCount = 0;
+const tightCornerM = sorted[0]?.positionM ?? 250;
+const hairpinM = sorted[Math.min(13, sorted.length - 1)]?.positionM ?? 900;
+const beforePlace = await page.evaluate(() => window.__tracklab.cameraState().customStands.length);
+const placeTargets = [tightCornerM, hairpinM];
 const placementRows = [];
-for (const dist of targets) {
-    for (let k = 0; k < 2 && placedCount < 5; k++) {
-        const r = await page.evaluate(
-            (d) => window.__tracklab.placeStandNearDistanceM(d),
-            dist + k * 18,
-        );
-        placementRows.push(r);
-        if (r.ok) placedCount++;
-    }
+for (const distM of placeTargets) {
+    const pt = await page.evaluate(
+        (d) => window.__tracklab.clientPointBesideCentrelineM(d, 30),
+        distM,
+    );
+    if (!pt) throw new Error(`no screen point beside centreline at ${distM} m`);
+    await page.mouse.move(pt.x, pt.y);
+    await page.mouse.down();
+    await page.mouse.up();
+    await page.waitForTimeout(220);
+    const after = await page.evaluate(() => window.__tracklab.cameraState().customStands.length);
+    placementRows.push({ distM, before: beforePlace + placementRows.length, after });
 }
-const clearances = await page.evaluate(() => window.__tracklab.standClearances());
-const onTrack = clearances.filter((c) => c.edgeClearanceM < STAND_MARGIN_M - 0.5);
-console.log('version-2 stand placements', JSON.stringify({ placedCount, placementRows, clearances, onTrack: onTrack.length }));
-if (onTrack.length > 0) {
-    throw new Error(`version-2: ${onTrack.length} stand(s) on/near tarmac`);
+const placedCount = (await page.evaluate(() => window.__tracklab.cameraState().customStands.length)) - beforePlace;
+if (placedCount < placeTargets.length) {
+    throw new Error(`pointer place near corners added ${placedCount} stands, wanted ${placeTargets.length}`);
 }
-for (const c of clearances) {
-    if (c.edgeClearanceM < STAND_MARGIN_M - 0.5) {
-        throw new Error(`stand "${c.name}" edge clearance ${c.edgeClearanceM?.toFixed(2)} m < ${STAND_MARGIN_M} m`);
-    }
-}
+const v2Footprint = await footprintReportOnPage(page);
+console.log('version-2 pointer placements', JSON.stringify({ placedCount, placementRows, v2Footprint }));
+assertFootprints('version-2 placed', v2Footprint);
 
 await page.evaluate(() => window.__tracklab.setPlaceStandActive(false));
 
@@ -382,7 +393,7 @@ const moved = await page.evaluate((before) => {
     const s1 = tl.cameraState().customStands[before.index];
     return {
         shiftM: Math.hypot(before.x - s1.x, before.y - s1.y),
-        edgeClearanceM: tl.trackEdgeClearanceM(s1.x, s1.y),
+        footprintClearanceM: tl.standFootprintClearances().find((r, i) => i === before.index)?.footprintClearanceM,
         camShift: Math.hypot(
             tl.cameraPosition().x - before.camX,
             tl.cameraPosition().y - before.camY,
@@ -398,7 +409,7 @@ const moved = await page.evaluate((before) => {
 });
 console.log('version-2 stand marker drag move', JSON.stringify(moved));
 if (!(moved.shiftM > 1)) throw new Error('pointer drag on stand marker should move the stand');
-if (moved.edgeClearanceM < STAND_MARGIN_M - 0.5) throw new Error('moved stand on/near tarmac');
+if (moved.footprintClearanceM < STAND_MARGIN_M - 0.5) throw new Error('moved stand footprint on/near tarmac');
 if (moved.camShift > 35) throw new Error('moving a stand should not move the overhead camera');
 
 await page.click('#stand-list button:first-child');
@@ -443,6 +454,7 @@ await page.waitForFunction(
     () => !window.__tracklab.isStandSeatView() && window.__tracklab.controlsEnabled(),
 );
 await page.waitForTimeout(400);
+await page.screenshot({ path: join(root, 'docs/grandstand_t1_hairpin_version2.png') });
 await page.screenshot({ path: join(root, 'docs/grandstand_sf_version2.png') });
 
 await browser.close();

@@ -474,6 +474,11 @@
         const STAND_RUNOFF_MARGIN_M = 15;
         const STAND_MIN_SPACING_M = 10;
         const STAND_SNAP_MAX_EXTRA_M = 100;
+        const STAND_SNAP_MAX_SLIDE_M = 100;
+        const STAND_WIDTH_M = 24;
+        const STAND_DEPTH_M = 12;
+        const STAND_TIER_HEIGHT_M = 3.4;
+        const TRACK_KERB_M = 2;
         let lastFrameMs = 0;
         let initialCameraApplied = false;
         const raycaster = new THREE.Raycaster();
@@ -2342,8 +2347,196 @@
             return center - halfW;
         }
 
+        function trackRoadHalfWidthM() {
+            return trackWidthM() / 2 + TRACK_KERB_M;
+        }
+
+        function standCenterOffsetM() {
+            return trackRoadHalfWidthM() + STAND_RUNOFF_MARGIN_M + STAND_DEPTH_M / 2;
+        }
+
+        /** @deprecated alias */
         function standOffsetM() {
-            return trackWidthM() / 2 + STAND_RUNOFF_MARGIN_M;
+            return standCenterOffsetM();
+        }
+
+        function vertexTrackNormal(i) {
+            const pts = layoutPoints;
+            const n = pts.length;
+            const pPrev = pts[(i - 1 + n) % n];
+            const pNext = pts[(i + 1) % n];
+            const dx = pNext.x - pPrev.x;
+            const dy = pNext.y - pPrev.y;
+            const len = Math.hypot(dx, dy) || 1;
+            return { nx: -dy / len, ny: dx / len };
+        }
+
+        function roadSectionPolygons() {
+            const pts = layoutPoints;
+            if (!pts || pts.length < 2) return [];
+            const hw = trackRoadHalfWidthM();
+            const polys = [];
+            for (let i = 0; i < pts.length; i++) {
+                const j = (i + 1) % pts.length;
+                const n0 = vertexTrackNormal(i);
+                const n1 = vertexTrackNormal(j);
+                const p0 = pts[i];
+                const p1 = pts[j];
+                polys.push([
+                    { x: p0.x + n0.nx * hw, y: p0.y + n0.ny * hw },
+                    { x: p1.x + n1.nx * hw, y: p1.y + n1.ny * hw },
+                    { x: p1.x - n1.nx * hw, y: p1.y - n1.ny * hw },
+                    { x: p0.x - n0.nx * hw, y: p0.y - n0.ny * hw },
+                ]);
+            }
+            return polys;
+        }
+
+        function pointInConvexPoly(px, py, poly) {
+            for (let i = 0; i < poly.length; i++) {
+                const a = poly[i];
+                const b = poly[(i + 1) % poly.length];
+                const cross = (b.x - a.x) * (py - a.y) - (b.y - a.y) * (px - a.x);
+                if (cross < -1e-5) return false;
+            }
+            return true;
+        }
+
+        function segmentsIntersect(ax, ay, bx, by, cx, cy, dx, dy) {
+            const cross = (x1, y1, x2, y2, x3, y3) => (x2 - x1) * (y3 - y1) - (y2 - y1) * (x3 - x1);
+            const d1 = cross(ax, ay, bx, by, cx, cy);
+            const d2 = cross(ax, ay, bx, by, dx, dy);
+            const d3 = cross(cx, cy, dx, dy, ax, ay);
+            const d4 = cross(cx, cy, dx, dy, bx, by);
+            if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0))
+                && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return true;
+            return false;
+        }
+
+        function convexPolygonsOverlap(a, b) {
+            for (const p of a) {
+                if (pointInConvexPoly(p.x, p.y, b)) return true;
+            }
+            for (const p of b) {
+                if (pointInConvexPoly(p.x, p.y, a)) return true;
+            }
+            for (let i = 0; i < a.length; i++) {
+                const a0 = a[i];
+                const a1 = a[(i + 1) % a.length];
+                for (let j = 0; j < b.length; j++) {
+                    const b0 = b[j];
+                    const b1 = b[(j + 1) % b.length];
+                    if (segmentsIntersect(a0.x, a0.y, a1.x, a1.y, b0.x, b0.y, b1.x, b1.y)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        function convexPolyMinDistanceM(a, b) {
+            if (convexPolygonsOverlap(a, b)) return 0;
+            let minD = Infinity;
+            for (const p of a) {
+                for (let i = 0; i < b.length; i++) {
+                    const b0 = b[i];
+                    const b1 = b[(i + 1) % b.length];
+                    minD = Math.min(minD, pointToSegmentDist(p.x, p.y, b0.x, b0.y, b1.x, b1.y));
+                }
+            }
+            for (const p of b) {
+                for (let i = 0; i < a.length; i++) {
+                    const a0 = a[i];
+                    const a1 = a[(i + 1) % a.length];
+                    minD = Math.min(minD, pointToSegmentDist(p.x, p.y, a0.x, a0.y, a1.x, a1.y));
+                }
+            }
+            for (let i = 0; i < a.length; i++) {
+                const a0 = a[i];
+                const a1 = a[(i + 1) % a.length];
+                for (let j = 0; j < b.length; j++) {
+                    const b0 = b[j];
+                    const b1 = b[(j + 1) % b.length];
+                    if (segmentsIntersect(a0.x, a0.y, a1.x, a1.y, b0.x, b0.y, b1.x, b1.y)) return 0;
+                    const m1 = pointToSegmentDist(a0.x, a0.y, b0.x, b0.y, b1.x, b1.y);
+                    const m2 = pointToSegmentDist(a1.x, a1.y, b0.x, b0.y, b1.x, b1.y);
+                    const m3 = pointToSegmentDist(b0.x, b0.y, a0.x, a0.y, a1.x, a1.y);
+                    const m4 = pointToSegmentDist(b1.x, b1.y, a0.x, a0.y, a1.x, a1.y);
+                    minD = Math.min(minD, m1, m2, m3, m4);
+                }
+            }
+            return minD;
+        }
+
+        function standOrientation(stand) {
+            let ox;
+            let oy;
+            if (Number.isFinite(stand.faceNx) && Number.isFinite(stand.faceNy)) {
+                ox = stand.faceNx;
+                oy = stand.faceNy;
+            } else if (stand.faceX != null && stand.faceY != null) {
+                ox = stand.x - stand.faceX;
+                oy = stand.y - stand.faceY;
+                const l = Math.hypot(ox, oy) || 1;
+                ox /= l;
+                oy /= l;
+            } else {
+                const frame = nearestCentrelineFrame(stand.x, stand.y);
+                if (!frame) return null;
+                ox = frame.nx;
+                oy = frame.ny;
+            }
+            const tx = -oy;
+            const ty = ox;
+            return { ox, oy, tx, ty };
+        }
+
+        function standFootprintPolygon(stand) {
+            const o = standOrientation(stand);
+            if (!o) return null;
+            const { ox, oy, tx, ty } = o;
+            const hw = STAND_WIDTH_M / 2;
+            const hd = STAND_DEPTH_M / 2;
+            const cx = stand.x;
+            const cy = stand.y;
+            return [
+                { x: cx + tx * hw - ox * hd, y: cy + ty * hw - oy * hd },
+                { x: cx + tx * hw + ox * hd, y: cy + ty * hw + oy * hd },
+                { x: cx - tx * hw + ox * hd, y: cy - ty * hw + oy * hd },
+                { x: cx - tx * hw - ox * hd, y: cy - ty * hw - oy * hd },
+            ];
+        }
+
+        function footprintPolygonMinClearanceM(footPoly) {
+            const roads = roadSectionPolygons();
+            if (!roads.length) return null;
+            let minD = Infinity;
+            for (const road of roads) {
+                minD = Math.min(minD, convexPolyMinDistanceM(footPoly, road));
+            }
+            return minD;
+        }
+
+        function standFootprintClearanceM(stand) {
+            const poly = standFootprintPolygon(stand);
+            if (!poly) return null;
+            return footprintPolygonMinClearanceM(poly);
+        }
+
+        function standFootprintOverlapsRoad(stand) {
+            const poly = standFootprintPolygon(stand);
+            if (!poly) return true;
+            const roads = roadSectionPolygons();
+            return roads.some((road) => convexPolygonsOverlap(poly, road));
+        }
+
+        function standFootprintPlacementOk(stand) {
+            const clear = standFootprintClearanceM(stand);
+            return clear != null && clear >= STAND_RUNOFF_MARGIN_M - 0.25;
+        }
+
+        function candidateStandAt(cx, cy, px, py, nx, ny) {
+            return { x: cx, y: cy, faceX: px, faceY: py, faceNx: nx, faceNy: ny };
         }
 
         function nearestCentrelineFrame(hintX, hintY) {
@@ -2422,43 +2615,38 @@
             const frame = nearestCentrelineFrame(hintX, hintY);
             if (!frame) return { ok: false, reason: 'Load a layout first' };
             const { px, py, nx, ny } = frame;
-            const base = standOffsetM();
-            for (let extra = 0; extra <= STAND_SNAP_MAX_EXTRA_M; extra += 1) {
-                const sx = px + nx * (base + extra);
-                const sy = py + ny * (base + extra);
-                const clear = trackEdgeClearanceM(sx, sy);
-                if (clear == null || clear < STAND_RUNOFF_MARGIN_M - 0.35) continue;
-                if (!force && otherStandsTooClose(sx, sy, excludeIndex)) {
-                    return { ok: false, reason: 'Too close to another stand' };
-                }
-                const elev = meshElevation(sx, sy);
-                if (!Number.isFinite(elev)) continue;
-                return {
-                    ok: true,
-                    x: sx,
-                    y: sy,
-                    eyeElev: elev + STAND_EYE_M,
-                    faceX: px,
-                    faceY: py,
-                    edgeClearanceM: clear,
-                };
-            }
-            if (force) {
-                const sx = px + nx * base;
-                const sy = py + ny * base;
-                const elev = meshElevation(sx, sy);
-                if (Number.isFinite(elev)) {
+            const tx = -ny;
+            const ty = nx;
+            const base = standCenterOffsetM();
+            const slideMax = force ? STAND_SNAP_MAX_SLIDE_M : 70;
+            const slideStep = 4;
+            for (let extra = 0; extra <= STAND_SNAP_MAX_EXTRA_M; extra += 2) {
+                for (let slide = -slideMax; slide <= slideMax; slide += slideStep) {
+                    const sx = px + nx * (base + extra) + tx * slide;
+                    const sy = py + ny * (base + extra) + ty * slide;
+                    if (!force && otherStandsTooClose(sx, sy, excludeIndex)) continue;
+                    const elev = meshElevation(sx, sy);
+                    if (!Number.isFinite(elev)) continue;
+                    const candidate = candidateStandAt(sx, sy, px, py, nx, ny);
+                    const footprintClearanceM = standFootprintClearanceM(candidate);
+                    if (footprintClearanceM == null
+                        || footprintClearanceM < STAND_RUNOFF_MARGIN_M - 0.25) continue;
                     return {
                         ok: true,
-                        forced: true,
                         x: sx,
                         y: sy,
                         eyeElev: elev + STAND_EYE_M,
                         faceX: px,
                         faceY: py,
-                        edgeClearanceM: trackEdgeClearanceM(sx, sy),
+                        faceNx: nx,
+                        faceNy: ny,
+                        footprintClearanceM,
+                        edgeClearanceM: footprintClearanceM,
                     };
                 }
+            }
+            if (!force && otherStandsTooClose(px + nx * base, py + ny * base, excludeIndex)) {
+                return { ok: false, reason: 'Too close to another stand' };
             }
             return { ok: false, reason: 'Stand would overlap the track' };
         }
@@ -2473,6 +2661,8 @@
                 eyeElev: snap.eyeElev,
                 faceX: snap.faceX,
                 faceY: snap.faceY,
+                faceNx: snap.faceNx,
+                faceNy: snap.faceNy,
             };
         }
 
@@ -2496,18 +2686,37 @@
             if (!show) return;
             customStands.forEach((s, i) => {
                 const ground = meshElevation(s.x, s.y);
-                const mesh = new THREE.Mesh(
-                    new THREE.CylinderGeometry(2.2, 2.2, 3.4, 14),
+                const orient = standOrientation(s);
+                const ox = orient?.ox ?? 0;
+                const oy = orient?.oy ?? 1;
+                const group = new THREE.Group();
+                const body = new THREE.Mesh(
+                    new THREE.BoxGeometry(STAND_WIDTH_M, STAND_TIER_HEIGHT_M, STAND_DEPTH_M),
+                    new THREE.MeshStandardMaterial({
+                        color: i === selectedCustomStand ? 0xffcc33 : 0xcc4455,
+                        roughness: 0.62,
+                        metalness: 0.05,
+                        transparent: true,
+                        opacity: i === selectedCustomStand ? 0.94 : 0.82,
+                    }),
+                );
+                body.position.set(0, 0, 0);
+                group.add(body);
+                const cap = new THREE.Mesh(
+                    new THREE.CylinderGeometry(1.4, 1.4, 0.35, 12),
                     new THREE.MeshBasicMaterial({
                         color: i === selectedCustomStand ? 0xffee22 : 0x4ecdc4,
                         transparent: true,
-                        opacity: i === selectedCustomStand ? 0.95 : 0.72,
+                        opacity: 0.85,
                         depthTest: true,
                     }),
                 );
-                mesh.position.set(s.x, ground - baseElevation + 1.7, -s.y);
-                mesh.userData.standIndex = i;
-                standMarkerGroup.add(mesh);
+                cap.position.set(0, STAND_TIER_HEIGHT_M / 2 + 0.2, 0);
+                group.add(cap);
+                group.position.set(s.x, ground - baseElevation + STAND_TIER_HEIGHT_M / 2, -s.y);
+                group.rotation.y = Math.atan2(ox, -oy);
+                group.userData.standIndex = i;
+                standMarkerGroup.add(group);
             });
         }
 
@@ -2557,6 +2766,8 @@
                         eyeElev: snap.eyeElev,
                         faceX: snap.faceX,
                         faceY: snap.faceY,
+                        faceNx: snap.faceNx,
+                        faceNy: snap.faceNy,
                     };
                 }
                 const snap = computeSnappedStand(pt.x, pt.y, pickIndex, false);
@@ -2569,6 +2780,8 @@
                     eyeElev: snap.eyeElev,
                     faceX: snap.faceX,
                     faceY: snap.faceY,
+                    faceNx: snap.faceNx,
+                    faceNy: snap.faceNy,
                 };
             };
             for (const c of sorted) {
@@ -2660,6 +2873,8 @@
             s.eyeElev = snap.eyeElev;
             s.faceX = snap.faceX;
             s.faceY = snap.faceY;
+            s.faceNx = snap.faceNx;
+            s.faceNy = snap.faceNy;
             if (!live) setStandStatus('');
             rebuildDriveStands();
             return true;
@@ -2685,6 +2900,8 @@
                 eyeElev: snap.eyeElev,
                 faceX: snap.faceX,
                 faceY: snap.faceY,
+                faceNx: snap.faceNx,
+                faceNy: snap.faceNy,
             });
             selectedCustomStand = idx;
             listSelectionIndex = idx;
@@ -3256,7 +3473,44 @@
                     return customStands.map((s) => ({
                         name: s.name,
                         edgeClearanceM: trackEdgeClearanceM(s.x, s.y),
+                        footprintClearanceM: standFootprintClearanceM(s),
+                        overlapsRoad: standFootprintOverlapsRoad(s),
                     }));
+                },
+                standFootprintClearances() {
+                    return customStands.map((s) => ({
+                        name: s.name,
+                        footprintClearanceM: standFootprintClearanceM(s),
+                        overlapsRoad: standFootprintOverlapsRoad(s),
+                    }));
+                },
+                layoutMinFootprintClearanceM() {
+                    const rows = customStands.map((s) => standFootprintClearanceM(s))
+                        .filter((d) => d != null);
+                    return rows.length ? Math.min(...rows) : null;
+                },
+                clientPointBesideCentrelineM(distM, offsetM = 26) {
+                    const pt = sampleCentreline(distM);
+                    if (!pt || !camera || !renderer) return null;
+                    const frame = nearestCentrelineFrame(pt.x, pt.y);
+                    if (!frame) return null;
+                    const hx = frame.px + frame.nx * offsetM;
+                    const hy = frame.py + frame.ny * offsetM;
+                    const ground = meshElevation(hx, hy);
+                    const v = new THREE.Vector3(
+                        hx,
+                        (ground - baseElevation + 1.2) * (world?.scale.y || 1),
+                        -hy,
+                    );
+                    const rect = renderer.domElement.getBoundingClientRect();
+                    v.project(camera);
+                    if (v.z > 1) return null;
+                    return {
+                        x: rect.left + (v.x * 0.5 + 0.5) * rect.width,
+                        y: rect.top + (-v.y * 0.5 + 0.5) * rect.height,
+                        layoutX: hx,
+                        layoutY: hy,
+                    };
                 },
                 cornerList() {
                     return (liveMetrics?.corners || []).map((c) => ({
