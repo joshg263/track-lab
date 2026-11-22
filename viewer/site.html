@@ -156,6 +156,12 @@
             margin: 4px 0;
             flex: 1 1 100%;
         }
+        #stand-setback-label {
+            font-size: 11px;
+            color: #9aa5b1;
+            margin: 2px 0 4px;
+            flex: 1 1 100%;
+        }
         #stand-status {
             font-size: 11px;
             color: #ff6b6b;
@@ -270,6 +276,7 @@
                 <button id="btn-place-stand" type="button" class="secondary">Place stand</button>
                 <button id="btn-view-stand" type="button" class="secondary" disabled>View from stand</button>
                 <button id="btn-delete-stand" type="button" class="secondary" disabled>Delete stand</button>
+                <div id="stand-setback-label">15 m from track edge</div>
                 <div id="stand-place-hint">Click to place · drag to look around · Esc to exit</div>
                 <div id="stand-status"></div>
             </div>
@@ -471,7 +478,9 @@
         let grandstandFov = 55;
         const PLACE_TAP_PX = 5;
         const PLACE_TAP_MS = 300;
-        const STAND_RUNOFF_MARGIN_M = 15;
+        /** Minimum clearance from stand footprint to outer keep-out boundary (track edge or run-off). */
+        const STAND_BOUNDARY_SETBACK_M = 15;
+        const STAND_RUNOFF_MARGIN_M = STAND_BOUNDARY_SETBACK_M;
         const STAND_MIN_SPACING_M = 10;
         const STAND_SNAP_MAX_EXTRA_M = 100;
         const STAND_SNAP_MAX_SLIDE_M = 100;
@@ -2352,7 +2361,30 @@
         }
 
         function standCenterOffsetM() {
-            return trackRoadHalfWidthM() + STAND_RUNOFF_MARGIN_M + STAND_DEPTH_M / 2;
+            return trackRoadHalfWidthM() + STAND_BOUNDARY_SETBACK_M + STAND_DEPTH_M / 2;
+        }
+
+        function trackKeepOutSectionPolygons() {
+            return roadSectionPolygons();
+        }
+
+        function getKeepOutPolygons() {
+            // TODO (PR 13): append run-off zone outer-edge polygons when run-off data exists for the layout.
+            return trackKeepOutSectionPolygons();
+        }
+
+        function keepOutBoundaryKindLabel() {
+            // TODO (PR 13): return "run-off edge" when any polygon comes from run-off data.
+            return 'track edge';
+        }
+
+        function standBoundarySetbackLabel() {
+            return `${STAND_BOUNDARY_SETBACK_M} m from ${keepOutBoundaryKindLabel()}`;
+        }
+
+        function updateStandSetbackLabel() {
+            const el = document.getElementById('stand-setback-label');
+            if (el) el.textContent = standBoundarySetbackLabel();
         }
 
         /** @deprecated alias */
@@ -2507,14 +2539,17 @@
             ];
         }
 
-        function footprintPolygonMinClearanceM(footPoly) {
-            const roads = roadSectionPolygons();
-            if (!roads.length) return null;
+        function footprintMinClearanceToBoundariesM(footPoly, boundaryPolys) {
+            if (!footPoly?.length || !boundaryPolys?.length) return null;
             let minD = Infinity;
-            for (const road of roads) {
-                minD = Math.min(minD, convexPolyMinDistanceM(footPoly, road));
+            for (const boundary of boundaryPolys) {
+                minD = Math.min(minD, convexPolyMinDistanceM(footPoly, boundary));
             }
             return minD;
+        }
+
+        function footprintPolygonMinClearanceM(footPoly, boundaryPolys = getKeepOutPolygons()) {
+            return footprintMinClearanceToBoundariesM(footPoly, boundaryPolys);
         }
 
         function standFootprintClearanceM(stand) {
@@ -2523,16 +2558,19 @@
             return footprintPolygonMinClearanceM(poly);
         }
 
-        function standFootprintOverlapsRoad(stand) {
+        function standFootprintOverlapsKeepOut(stand, boundaryPolys = getKeepOutPolygons()) {
             const poly = standFootprintPolygon(stand);
             if (!poly) return true;
-            const roads = roadSectionPolygons();
-            return roads.some((road) => convexPolygonsOverlap(poly, road));
+            return boundaryPolys.some((boundary) => convexPolygonsOverlap(poly, boundary));
+        }
+
+        function standFootprintOverlapsRoad(stand) {
+            return standFootprintOverlapsKeepOut(stand);
         }
 
         function standFootprintPlacementOk(stand) {
             const clear = standFootprintClearanceM(stand);
-            return clear != null && clear >= STAND_RUNOFF_MARGIN_M - 0.25;
+            return clear != null && clear >= STAND_BOUNDARY_SETBACK_M - 0.25;
         }
 
         function candidateStandAt(cx, cy, px, py, nx, ny) {
@@ -2630,7 +2668,7 @@
                     const candidate = candidateStandAt(sx, sy, px, py, nx, ny);
                     const footprintClearanceM = standFootprintClearanceM(candidate);
                     if (footprintClearanceM == null
-                        || footprintClearanceM < STAND_RUNOFF_MARGIN_M - 0.25) continue;
+                        || footprintClearanceM < STAND_BOUNDARY_SETBACK_M - 0.25) continue;
                     return {
                         ok: true,
                         x: sx,
@@ -2751,12 +2789,12 @@
                 const pt = sampleCentreline(c.position_m);
                 if (!pt) return null;
                 for (let probe = 0; probe <= 80; probe += 4) {
-                    const hintX = pt.x + (probe + STAND_RUNOFF_MARGIN_M) * 0.15;
-                    const hintY = pt.y + (probe + STAND_RUNOFF_MARGIN_M) * 0.15;
+                    const hintX = pt.x + (probe + STAND_BOUNDARY_SETBACK_M) * 0.15;
+                    const hintY = pt.y + (probe + STAND_BOUNDARY_SETBACK_M) * 0.15;
                     const snap = computeSnappedStand(hintX, hintY, pickIndex, false);
                     if (!snap.ok) continue;
                     const clear = snap.edgeClearanceM;
-                    if (clear == null || clear < STAND_RUNOFF_MARGIN_M - 0.5) continue;
+                    if (clear == null || clear < STAND_BOUNDARY_SETBACK_M - 0.5) continue;
                     if (clear > 120.5) continue;
                     return {
                         id: `suggest-${picks.length}`,
@@ -2837,6 +2875,7 @@
         }
 
         function refreshStandUi() {
+            updateStandSetbackLabel();
             const list = document.getElementById('stand-list');
             if (!list) return;
             list.innerHTML = '';
@@ -2941,6 +2980,7 @@
                 setPlaceStandActive(false);
             }
             refreshStandUi();
+            updateStandSetbackLabel();
             const placeHint = document.getElementById('stand-place-hint');
             if (placeHint) {
                 placeHint.textContent = placeStandActive
@@ -3458,7 +3498,11 @@
                     if (!camera) return null;
                     return { x: camera.position.x, y: camera.position.y, z: camera.position.z };
                 },
-                standRunoffMarginM: STAND_RUNOFF_MARGIN_M,
+                standBoundarySetbackM: STAND_BOUNDARY_SETBACK_M,
+                standRunoffMarginM: STAND_BOUNDARY_SETBACK_M,
+                standBoundarySetbackLabel,
+                getKeepOutPolygons,
+                footprintMinClearanceToBoundariesM,
                 placeStandNearDistanceM(distM) {
                     const p = sampleCentreline(distM);
                     if (!p) return { ok: false, reason: 'no point' };
