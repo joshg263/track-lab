@@ -143,10 +143,47 @@
         #note-list li { font-size: 11px; color: #ccc; margin: 3px 0; }
         #note-list .note-time { color: #888; font-family: monospace; margin-right: 4px; }
         #btn-export-events { display: none; }
-        #camera-modes, #stand-switch, #drive-transport {
+        #camera-modes, #stand-panel, #stand-list, #stand-tools, #drive-transport {
             display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0;
         }
-        #camera-modes button, #stand-switch button { flex: 1 1 42%; margin: 0; }
+        #camera-modes button, #stand-list button, #stand-tools button { flex: 1 1 42%; margin: 0; }
+        #stand-list button { flex: 1 1 100%; text-align: left; }
+        #stand-place-hint {
+            display: none;
+            font-size: 11px;
+            color: #f9ca24;
+            line-height: 1.35;
+            margin: 4px 0;
+            flex: 1 1 100%;
+        }
+        #stand-setback-label {
+            font-size: 11px;
+            color: #9aa5b1;
+            margin: 2px 0 4px;
+            flex: 1 1 100%;
+        }
+        #stand-status {
+            font-size: 11px;
+            color: #ff6b6b;
+            margin: 4px 0;
+            flex: 1 1 100%;
+            min-height: 1.2em;
+        }
+        #stand-mode-banner {
+            display: none;
+            position: fixed;
+            top: 12px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 120;
+            background: rgba(0, 0, 0, 0.82);
+            color: #f9ca24;
+            font-size: 13px;
+            padding: 8px 14px;
+            border-radius: 6px;
+            border: 1px solid #f9ca24;
+            pointer-events: none;
+        }
         #drive-readout {
             font-family: monospace; font-size: 12px; color: #00ffcc; margin-top: 4px; line-height: 1.45;
         }
@@ -198,6 +235,7 @@
 </head>
 <body>
     <div id="loading">Loading site data...</div>
+    <div id="stand-mode-banner"></div>
     <div id="canvas-container"></div>
 
     <div id="controls" class="panel">
@@ -232,9 +270,21 @@
             <button id="btn-cam-grandstand" type="button" class="secondary">Grandstand</button>
             <button id="btn-cam-helicopter" type="button" class="secondary">Helicopter</button>
         </div>
-        <div id="stand-switch" style="display: none;">
-            <button id="btn-stand-0" type="button" class="secondary">Best viewpoint</button>
-            <button id="btn-stand-1" type="button" class="secondary">Opposite rim</button>
+        <div id="stand-panel" style="display: none;">
+            <div id="stand-list"></div>
+            <div id="stand-tools">
+                <button id="btn-place-stand" type="button" class="secondary">Place stand</button>
+                <button id="btn-view-stand" type="button" class="secondary" disabled>View from stand</button>
+                <button id="btn-delete-stand" type="button" class="secondary" disabled>Delete stand</button>
+                <div id="stand-setback-label">15 m from track edge</div>
+                <div id="stand-place-hint">Click to place · drag to look around · Esc to exit</div>
+                <div id="stand-status"></div>
+            </div>
+            <label id="stand-fov-label">
+                Zoom
+                <input id="stand-fov" type="range" min="28" max="85" step="1" value="55">
+                <span id="stand-fov-value">55°</span>
+            </label>
         </div>
         <div id="drive-panel">
             <div id="drive-transport">
@@ -400,6 +450,9 @@
         let sampleZ = () => 0;
         let cameraMode = 'orbit';
         let grandstandIndex = 0;
+        let listSelectionIndex = -1;
+        let standSeatView = false;
+        let seatStandIndex = -1;
         let driveDistance = 0;
         let drivePlaying = false;
         let driveSpeedMul = 1;
@@ -410,7 +463,31 @@
         let heliOrbit = 0.55;
         let savedOrbit = null;
         let carMarker = null;
+        let carBeacon = null;
         let driveStands = [];
+        let customStands = [];
+        let presetStands = [];
+        let placeStandActive = false;
+        let placePointer = null;
+        let selectedCustomStand = -1;
+        let standDragging = false;
+        let standDragIndex = -1;
+        let standDragPointerId = null;
+        let standDragMoved = false;
+        let standMarkerGroup = null;
+        let grandstandFov = 55;
+        const PLACE_TAP_PX = 5;
+        const PLACE_TAP_MS = 300;
+        /** Minimum clearance from stand footprint to outer keep-out boundary (track edge or run-off). */
+        const STAND_BOUNDARY_SETBACK_M = 15;
+        const STAND_RUNOFF_MARGIN_M = STAND_BOUNDARY_SETBACK_M;
+        const STAND_MIN_SPACING_M = 10;
+        const STAND_SNAP_MAX_EXTRA_M = 100;
+        const STAND_SNAP_MAX_SLIDE_M = 100;
+        const STAND_WIDTH_M = 24;
+        const STAND_DEPTH_M = 12;
+        const STAND_TIER_HEIGHT_M = 3.4;
+        const TRACK_KERB_M = 2;
         let lastFrameMs = 0;
         let initialCameraApplied = false;
         const raycaster = new THREE.Raycaster();
@@ -616,7 +693,8 @@
                 
                 rebuildTerrain(tex);
                 buildViewpointMarker();
-                buildGrandstands();
+                buildPresetStands();
+                rebuildDriveStands();
                 updateSiteUI();
                 setDefaultCamera();
                 
@@ -679,6 +757,14 @@
                 selectedIndex = -1;
                 liveViewshedPct = null;
                 applyWorkingLayout();
+                if (Object.prototype.hasOwnProperty.call(layout, 'stands')) {
+                    customStands = standsFromLayout(layout);
+                    snapAllCustomStands(true);
+                } else {
+                    customStands = suggestDefaultStands();
+                }
+                selectedCustomStand = -1;
+                rebuildDriveStands();
 
                 document.getElementById('layout-direction').textContent = layout.direction || '';
                 document.getElementById('layout-direction').style.display = layout.direction ? 'block' : 'none';
@@ -705,6 +791,9 @@
             undoStack = [];
             selectedIndex = -1;
             liveViewshedPct = null;
+            customStands = [];
+            placeStandActive = false;
+            rebuildDriveStands();
             clearHandles();
             
             clearTrackRibbon();
@@ -1328,6 +1417,12 @@
                 viewshedPending = true;
                 updateLayoutUI();
             }
+            if (customStands.length && !standDragging) {
+                const before = JSON.stringify(customStands.map(s => [s.x, s.y]));
+                snapAllCustomStands(true);
+                const after = JSON.stringify(customStands.map(s => [s.x, s.y]));
+                if (before !== after) rebuildDriveStands();
+            }
             onLayoutPathChanged();
         }
 
@@ -1557,6 +1652,12 @@
                 notes: note || currentLayout?.notes || '',
                 edited_from: currentLayoutKey,
             };
+            payload.stands = customStands.map((s) => {
+                const item = { x: round2(s.x), y: round2(s.y) };
+                if (s.name) item.name = s.name;
+                if (Number.isFinite(s.eyeElev)) item.eye_elev_m = round2(s.eyeElev);
+                return item;
+            });
             let via = 'download';
             try {
                 const res = await fetch('/api/layouts/edits', {
@@ -1623,7 +1724,136 @@
             return { x: hits[0].point.x, y: -hits[0].point.z };
         }
 
+        function syncStandControlsEnabled() {
+            if (!controls) return;
+            if (cameraMode === 'orbit') {
+                controls.enabled = !dragging;
+                return;
+            }
+            if (cameraMode === 'grandstand') {
+                controls.enabled = !standDragging;
+            }
+        }
+
+        function frameStandOverhead() {
+            if (!layoutPoints?.length || !camera || !controls) return;
+            let minX = Infinity;
+            let maxX = -Infinity;
+            let minY = Infinity;
+            let maxY = -Infinity;
+            const grow = (x, y) => {
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+            };
+            for (const p of layoutPoints) grow(p.x, p.y);
+            for (const s of customStands) grow(s.x, s.y);
+            const cx = (minX + maxX) / 2;
+            const cz = -((minY + maxY) / 2);
+            const size = Math.max(maxX - minX, maxY - minY, 200);
+            const dist = size * 0.92;
+            camera.position.set(cx + dist * 0.1, dist * 0.78, cz + dist * 0.42);
+            controls.target.set(cx, 0, cz);
+            controls.update();
+        }
+
+        function standSeatLookTarget() {
+            const car = layoutPoints ? onboardStation(driveDistance) : null;
+            const ahead = layoutPoints ? onboardStation(driveDistance + 120) : null;
+            if (car && ahead) {
+                return new THREE.Vector3(
+                    car.sceneX * 0.65 + ahead.sceneX * 0.35,
+                    car.sceneY * 0.65 + ahead.sceneY * 0.35,
+                    car.sceneZ * 0.65 + ahead.sceneZ * 0.35,
+                );
+            }
+            if (car) return new THREE.Vector3(car.sceneX, car.sceneY, car.sceneZ);
+            return controls?.target?.clone() || new THREE.Vector3();
+        }
+
+        function enterStandSeatView(index) {
+            const stand = driveStands[index];
+            if (!stand || !camera || !controls) return;
+            standSeatView = true;
+            seatStandIndex = index;
+            placeStandActive = false;
+            placePointer = null;
+            camera.up.set(0, 1, 0);
+            camera.position.set(stand.x, sceneY(stand.eyeElev), -stand.y);
+            controls.target.copy(standSeatLookTarget());
+            controls.enabled = true;
+            controls.update();
+            rebuildStandMarkers();
+            updateStandModeBanner();
+            updateCameraModeUi();
+        }
+
+        function exitStandSeatView() {
+            if (!standSeatView) return;
+            standSeatView = false;
+            seatStandIndex = -1;
+            frameStandOverhead();
+            syncStandControlsEnabled();
+            rebuildStandMarkers();
+            updateStandModeBanner();
+            updateCameraModeUi();
+        }
+
+        function enterGrandstandLayout() {
+            standSeatView = false;
+            seatStandIndex = -1;
+            selectedCustomStand = -1;
+            listSelectionIndex = -1;
+            placePointer = null;
+            frameStandOverhead();
+            syncStandControlsEnabled();
+            updateCarMarker();
+            rebuildStandMarkers();
+            updateStandModeBanner();
+        }
+
         function onPointerDown(e) {
+            if (cameraMode === 'grandstand' && !placeStandActive) {
+                const primary = e.isPrimary !== false;
+                const left = e.button === undefined || e.button === 0;
+                if (primary && left) {
+                    const idx = pickStandMarker(e.clientX, e.clientY);
+                    if (idx >= 0) {
+                        selectedCustomStand = idx;
+                        listSelectionIndex = idx;
+                        standDragging = true;
+                        standDragIndex = idx;
+                        standDragMoved = false;
+                        standDragPointerId = e.pointerId;
+                        controls.enabled = false;
+                        renderer.domElement.setPointerCapture(e.pointerId);
+                        refreshStandUi();
+                        rebuildStandMarkers();
+                        updateStandModeBanner();
+                        e.preventDefault();
+                        e.stopPropagation();
+                        return;
+                    }
+                    selectedCustomStand = -1;
+                    refreshStandUi();
+                    rebuildStandMarkers();
+                    updateStandModeBanner();
+                }
+            }
+            if (placeStandActive && cameraMode === 'grandstand') {
+                const primary = e.isPrimary !== false;
+                const left = e.button === undefined || e.button === 0;
+                if (primary && left) {
+                    placePointer = {
+                        x: e.clientX,
+                        y: e.clientY,
+                        t: performance.now(),
+                        id: e.pointerId,
+                    };
+                }
+                return;
+            }
             if (cameraMode !== 'orbit') return;
             if (!editMode || !workingPoints) return;
             if (e.button !== undefined && e.button !== 0) return;
@@ -1644,6 +1874,17 @@
         }
 
         function onPointerMove(e) {
+            if (standDragging && e.pointerId === standDragPointerId) {
+                e.preventDefault();
+                e.stopPropagation();
+                const g = groundAt(e.clientX, e.clientY);
+                if (!g) return;
+                if (moveCustomStand(standDragIndex, g.x, g.y, true)) {
+                    standDragMoved = true;
+                    rebuildStandMarkers();
+                }
+                return;
+            }
             if (!dragging || e.pointerId !== dragPointerId) return;
             const g = groundAt(e.clientX, e.clientY);
             if (!g) return;
@@ -1659,7 +1900,61 @@
             });
         }
 
+        function tryPlaceStandTap(e) {
+            if (!placePointer || e.pointerId !== placePointer.id) return false;
+            const start = placePointer;
+            placePointer = null;
+            const dx = e.clientX - start.x;
+            const dy = e.clientY - start.y;
+            const dt = performance.now() - start.t;
+            if (Math.hypot(dx, dy) >= PLACE_TAP_PX || dt >= PLACE_TAP_MS) return false;
+            const g = groundAt(e.clientX, e.clientY);
+            if (!g) return false;
+            return placeStandAt(g.x, g.y);
+        }
+
+        function syncPlaceStandControls() {
+            if (!placeStandActive || cameraMode !== 'grandstand') return;
+            if (standSeatView) exitStandSeatView();
+            syncStandControlsEnabled();
+        }
+
+        function setPlaceStandActive(on) {
+            if (on && customStands.length >= 4) {
+                setStandStatus('Maximum 4 stands');
+                on = false;
+            }
+            placeStandActive = !!on && cameraMode === 'grandstand';
+            placePointer = null;
+            if (placeStandActive) {
+                selectedCustomStand = -1;
+                listSelectionIndex = -1;
+                standDragging = false;
+                if (standSeatView) exitStandSeatView();
+            }
+            syncPlaceStandControls();
+            setStandStatus('');
+            updateCameraModeUi();
+        }
+
         function onPointerUp(e) {
+            if (standDragging && e.pointerId === standDragPointerId) {
+                const moved = standDragMoved;
+                standDragging = false;
+                standDragPointerId = null;
+                if (controls) syncStandControlsEnabled();
+                if (moved) {
+                    const g = groundAt(e.clientX, e.clientY);
+                    if (g) moveCustomStand(standDragIndex, g.x, g.y, false);
+                }
+                rebuildStandMarkers();
+                updateStandModeBanner();
+                return;
+            }
+            if (placeStandActive && cameraMode === 'grandstand') {
+                tryPlaceStandTap(e);
+                return;
+            }
             if (!dragging || (dragPointerId != null && e.pointerId !== dragPointerId)) return;
             const moved = dragMoved;
             const index = dragIndex;
@@ -1667,7 +1962,7 @@
             const after = workingPoints[index];
             dragging = false;
             dragPointerId = null;
-            if (controls) controls.enabled = cameraMode === 'orbit';
+            syncStandControlsEnabled();
             if (moved) {
                 undoStack.push(dragBeforePoints);
                 if (undoStack.length > 50) undoStack.shift();
@@ -1680,6 +1975,20 @@
             }
             dragBeforePoints = null;
             updateEditButtons();
+        }
+
+        function onPointerCancel(e) {
+            if (placePointer && e.pointerId === placePointer.id) placePointer = null;
+            if (standDragging && e.pointerId === standDragPointerId) {
+                standDragging = false;
+                standDragPointerId = null;
+                syncStandControlsEnabled();
+                rebuildStandMarkers();
+                updateStandModeBanner();
+            }
+            if (dragging && (dragPointerId == null || e.pointerId === dragPointerId)) {
+                onPointerUp(e);
+            }
         }
 
         function onDoubleClick(e) {
@@ -1849,6 +2158,16 @@
             );
             carMarker.castShadow = true;
             carMarker.visible = false;
+            carBeacon = new THREE.Mesh(
+                new THREE.SphereGeometry(0.4, 10, 10),
+                new THREE.MeshBasicMaterial({
+                    color: 0xffee22, depthTest: false, transparent: true, opacity: 0.95,
+                }),
+            );
+            carBeacon.position.set(0, 1.05, 0);
+            carBeacon.renderOrder = 24;
+            carBeacon.visible = false;
+            carMarker.add(carBeacon);
             world.add(carMarker);
         }
 
@@ -1872,16 +2191,22 @@
             carMarker.rotation.set(0, Math.atan2(fwd.x, fwd.z), 0);
             // The onboard camera is the driver's eye, a few centimetres above this roof.
             carMarker.visible = cameraMode !== 'onboard';
+            if (carBeacon) carBeacon.visible = cameraMode === 'grandstand' && standSeatView;
             if (cameraMode === 'orbit' && camera && controls) {
                 const dist = Math.max(80, camera.position.distanceTo(controls.target));
                 carMarker.scale.setScalar(THREE.MathUtils.clamp(dist / 280, 5, 16));
                 carMarker.material.depthTest = false;
+                carMarker.material.emissive.setHex(0x551018);
                 carMarker.renderOrder = 12;
             } else if (cameraMode === 'grandstand' && camera) {
                 const dist = Math.max(40, camera.position.distanceTo(worldPos));
-                carMarker.scale.setScalar(THREE.MathUtils.clamp(dist / 90, 3, 16));
-                carMarker.material.depthTest = true;
-                carMarker.renderOrder = 0;
+                const fovRad = THREE.MathUtils.degToRad(camera.fov);
+                const maxScale = (dist * Math.tan(fovRad / 8)) / 4.4;
+                const raw = THREE.MathUtils.clamp(dist / 45, 2, 22);
+                carMarker.scale.setScalar(Math.max(1, Math.min(raw, maxScale)));
+                carMarker.material.depthTest = false;
+                carMarker.material.emissive.setHex(0x881018);
+                carMarker.renderOrder = 14;
             } else if (cameraMode === 'helicopter') {
                 carMarker.scale.setScalar(2.2);
                 carMarker.material.depthTest = true;
@@ -1889,6 +2214,7 @@
             } else {
                 carMarker.scale.set(1, 1, 1);
                 carMarker.material.depthTest = true;
+                carMarker.material.emissive.setHex(0x551018);
                 carMarker.renderOrder = 0;
             }
         }
@@ -1975,18 +2301,547 @@
         function applyDriveCamera(dt) {
             if (!camera) return;
             if (cameraMode === 'onboard') applyOnboard(driveDistance, dt);
-            else if (cameraMode === 'grandstand') applyGrandstand(driveDistance);
+            else if (cameraMode === 'grandstand' && standSeatView) applyGrandstand(driveDistance);
             else if (cameraMode === 'helicopter') applyHelicopter(driveDistance, dt);
         }
 
-        function buildGrandstands() {
-            driveStands = [];
+        function standsFromLayout(layout) {
+            const raw = layout.stands;
+            if (!Array.isArray(raw)) return [];
+            const out = [];
+            for (let i = 0; i < raw.length && i < 4; i++) {
+                const s = raw[i];
+                if (typeof s?.x !== 'number' || typeof s?.y !== 'number') continue;
+                if (!Number.isFinite(s.x) || !Number.isFinite(s.y)) continue;
+                const elev = meshElevation(s.x, s.y);
+                const name = typeof s.name === 'string' && s.name.trim()
+                    ? s.name.trim().slice(0, 64) : `Stand ${out.length + 1}`;
+                out.push({
+                    id: `custom-${out.length}`,
+                    name,
+                    x: s.x,
+                    y: s.y,
+                    eyeElev: Number.isFinite(s.eye_elev_m) ? s.eye_elev_m : elev + STAND_EYE_M,
+                });
+            }
+            return out;
+        }
+
+        function pointToSegmentDist(x, y, x0, y0, x1, y1) {
+            const dx = x1 - x0;
+            const dy = y1 - y0;
+            const lenSq = dx * dx + dy * dy;
+            if (lenSq < 1e-12) return Math.hypot(x - x0, y - y0);
+            let t = ((x - x0) * dx + (y - y0) * dy) / lenSq;
+            t = Math.max(0, Math.min(1, t));
+            return Math.hypot(x - (x0 + t * dx), y - (y0 + t * dy));
+        }
+
+        function nearestTrackCenterlineM(x, y) {
+            const pts = layoutPoints;
+            if (!pts || pts.length < 2) return null;
+            let best = Infinity;
+            for (let i = 0; i < pts.length; i++) {
+                const j = (i + 1) % pts.length;
+                const d = pointToSegmentDist(x, y, pts[i].x, pts[i].y, pts[j].x, pts[j].y);
+                if (d < best) best = d;
+            }
+            return best;
+        }
+
+        function trackEdgeClearanceM(x, y) {
+            const center = nearestTrackCenterlineM(x, y);
+            if (center == null) return null;
+            const halfW = trackWidthM() / 2;
+            return center - halfW;
+        }
+
+        function trackRoadHalfWidthM() {
+            return trackWidthM() / 2 + TRACK_KERB_M;
+        }
+
+        function standCenterOffsetM() {
+            return trackRoadHalfWidthM() + STAND_BOUNDARY_SETBACK_M + STAND_DEPTH_M / 2;
+        }
+
+        function trackKeepOutSectionPolygons() {
+            return roadSectionPolygons();
+        }
+
+        function getKeepOutPolygons() {
+            // TODO (PR 13): append run-off zone outer-edge polygons when run-off data exists for the layout.
+            return trackKeepOutSectionPolygons();
+        }
+
+        function keepOutBoundaryKindLabel() {
+            // TODO (PR 13): return "run-off edge" when any polygon comes from run-off data.
+            return 'track edge';
+        }
+
+        function standBoundarySetbackLabel() {
+            return `${STAND_BOUNDARY_SETBACK_M} m from ${keepOutBoundaryKindLabel()}`;
+        }
+
+        function updateStandSetbackLabel() {
+            const el = document.getElementById('stand-setback-label');
+            if (el) el.textContent = standBoundarySetbackLabel();
+        }
+
+        /** @deprecated alias */
+        function standOffsetM() {
+            return standCenterOffsetM();
+        }
+
+        function vertexTrackNormal(i) {
+            const pts = layoutPoints;
+            const n = pts.length;
+            const pPrev = pts[(i - 1 + n) % n];
+            const pNext = pts[(i + 1) % n];
+            const dx = pNext.x - pPrev.x;
+            const dy = pNext.y - pPrev.y;
+            const len = Math.hypot(dx, dy) || 1;
+            return { nx: -dy / len, ny: dx / len };
+        }
+
+        function roadSectionPolygons() {
+            const pts = layoutPoints;
+            if (!pts || pts.length < 2) return [];
+            const hw = trackRoadHalfWidthM();
+            const polys = [];
+            for (let i = 0; i < pts.length; i++) {
+                const j = (i + 1) % pts.length;
+                const n0 = vertexTrackNormal(i);
+                const n1 = vertexTrackNormal(j);
+                const p0 = pts[i];
+                const p1 = pts[j];
+                polys.push([
+                    { x: p0.x + n0.nx * hw, y: p0.y + n0.ny * hw },
+                    { x: p1.x + n1.nx * hw, y: p1.y + n1.ny * hw },
+                    { x: p1.x - n1.nx * hw, y: p1.y - n1.ny * hw },
+                    { x: p0.x - n0.nx * hw, y: p0.y - n0.ny * hw },
+                ]);
+            }
+            return polys;
+        }
+
+        function pointInConvexPoly(px, py, poly) {
+            for (let i = 0; i < poly.length; i++) {
+                const a = poly[i];
+                const b = poly[(i + 1) % poly.length];
+                const cross = (b.x - a.x) * (py - a.y) - (b.y - a.y) * (px - a.x);
+                if (cross < -1e-5) return false;
+            }
+            return true;
+        }
+
+        function segmentsIntersect(ax, ay, bx, by, cx, cy, dx, dy) {
+            const cross = (x1, y1, x2, y2, x3, y3) => (x2 - x1) * (y3 - y1) - (y2 - y1) * (x3 - x1);
+            const d1 = cross(ax, ay, bx, by, cx, cy);
+            const d2 = cross(ax, ay, bx, by, dx, dy);
+            const d3 = cross(cx, cy, dx, dy, ax, ay);
+            const d4 = cross(cx, cy, dx, dy, bx, by);
+            if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0))
+                && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return true;
+            return false;
+        }
+
+        function convexPolygonsOverlap(a, b) {
+            for (const p of a) {
+                if (pointInConvexPoly(p.x, p.y, b)) return true;
+            }
+            for (const p of b) {
+                if (pointInConvexPoly(p.x, p.y, a)) return true;
+            }
+            for (let i = 0; i < a.length; i++) {
+                const a0 = a[i];
+                const a1 = a[(i + 1) % a.length];
+                for (let j = 0; j < b.length; j++) {
+                    const b0 = b[j];
+                    const b1 = b[(j + 1) % b.length];
+                    if (segmentsIntersect(a0.x, a0.y, a1.x, a1.y, b0.x, b0.y, b1.x, b1.y)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        function convexPolyMinDistanceM(a, b) {
+            if (convexPolygonsOverlap(a, b)) return 0;
+            let minD = Infinity;
+            for (const p of a) {
+                for (let i = 0; i < b.length; i++) {
+                    const b0 = b[i];
+                    const b1 = b[(i + 1) % b.length];
+                    minD = Math.min(minD, pointToSegmentDist(p.x, p.y, b0.x, b0.y, b1.x, b1.y));
+                }
+            }
+            for (const p of b) {
+                for (let i = 0; i < a.length; i++) {
+                    const a0 = a[i];
+                    const a1 = a[(i + 1) % a.length];
+                    minD = Math.min(minD, pointToSegmentDist(p.x, p.y, a0.x, a0.y, a1.x, a1.y));
+                }
+            }
+            for (let i = 0; i < a.length; i++) {
+                const a0 = a[i];
+                const a1 = a[(i + 1) % a.length];
+                for (let j = 0; j < b.length; j++) {
+                    const b0 = b[j];
+                    const b1 = b[(j + 1) % b.length];
+                    if (segmentsIntersect(a0.x, a0.y, a1.x, a1.y, b0.x, b0.y, b1.x, b1.y)) return 0;
+                    const m1 = pointToSegmentDist(a0.x, a0.y, b0.x, b0.y, b1.x, b1.y);
+                    const m2 = pointToSegmentDist(a1.x, a1.y, b0.x, b0.y, b1.x, b1.y);
+                    const m3 = pointToSegmentDist(b0.x, b0.y, a0.x, a0.y, a1.x, a1.y);
+                    const m4 = pointToSegmentDist(b1.x, b1.y, a0.x, a0.y, a1.x, a1.y);
+                    minD = Math.min(minD, m1, m2, m3, m4);
+                }
+            }
+            return minD;
+        }
+
+        function standOrientation(stand) {
+            let ox;
+            let oy;
+            if (Number.isFinite(stand.faceNx) && Number.isFinite(stand.faceNy)) {
+                ox = stand.faceNx;
+                oy = stand.faceNy;
+            } else if (stand.faceX != null && stand.faceY != null) {
+                ox = stand.x - stand.faceX;
+                oy = stand.y - stand.faceY;
+                const l = Math.hypot(ox, oy) || 1;
+                ox /= l;
+                oy /= l;
+            } else {
+                const frame = nearestCentrelineFrame(stand.x, stand.y);
+                if (!frame) return null;
+                ox = frame.nx;
+                oy = frame.ny;
+            }
+            const tx = -oy;
+            const ty = ox;
+            return { ox, oy, tx, ty };
+        }
+
+        function standFootprintPolygon(stand) {
+            const o = standOrientation(stand);
+            if (!o) return null;
+            const { ox, oy, tx, ty } = o;
+            const hw = STAND_WIDTH_M / 2;
+            const hd = STAND_DEPTH_M / 2;
+            const cx = stand.x;
+            const cy = stand.y;
+            return [
+                { x: cx + tx * hw - ox * hd, y: cy + ty * hw - oy * hd },
+                { x: cx + tx * hw + ox * hd, y: cy + ty * hw + oy * hd },
+                { x: cx - tx * hw + ox * hd, y: cy - ty * hw + oy * hd },
+                { x: cx - tx * hw - ox * hd, y: cy - ty * hw - oy * hd },
+            ];
+        }
+
+        function footprintMinClearanceToBoundariesM(footPoly, boundaryPolys) {
+            if (!footPoly?.length || !boundaryPolys?.length) return null;
+            let minD = Infinity;
+            for (const boundary of boundaryPolys) {
+                minD = Math.min(minD, convexPolyMinDistanceM(footPoly, boundary));
+            }
+            return minD;
+        }
+
+        function footprintPolygonMinClearanceM(footPoly, boundaryPolys = getKeepOutPolygons()) {
+            return footprintMinClearanceToBoundariesM(footPoly, boundaryPolys);
+        }
+
+        function standFootprintClearanceM(stand) {
+            const poly = standFootprintPolygon(stand);
+            if (!poly) return null;
+            return footprintPolygonMinClearanceM(poly);
+        }
+
+        function standFootprintOverlapsKeepOut(stand, boundaryPolys = getKeepOutPolygons()) {
+            const poly = standFootprintPolygon(stand);
+            if (!poly) return true;
+            return boundaryPolys.some((boundary) => convexPolygonsOverlap(poly, boundary));
+        }
+
+        function standFootprintOverlapsRoad(stand) {
+            return standFootprintOverlapsKeepOut(stand);
+        }
+
+        function standFootprintPlacementOk(stand) {
+            const clear = standFootprintClearanceM(stand);
+            return clear != null && clear >= STAND_BOUNDARY_SETBACK_M - 0.25;
+        }
+
+        function candidateStandAt(cx, cy, px, py, nx, ny) {
+            return { x: cx, y: cy, faceX: px, faceY: py, faceNx: nx, faceNy: ny };
+        }
+
+        function nearestCentrelineFrame(hintX, hintY) {
+            const pts = layoutPoints;
+            if (!pts || pts.length < 2) return null;
+            let best = null;
+            for (let i = 0; i < pts.length; i++) {
+                const j = (i + 1) % pts.length;
+                const x0 = pts[i].x;
+                const y0 = pts[i].y;
+                const x1 = pts[j].x;
+                const y1 = pts[j].y;
+                const dx = x1 - x0;
+                const dy = y1 - y0;
+                const lenSq = dx * dx + dy * dy;
+                let t = 0;
+                if (lenSq > 1e-12) {
+                    t = ((hintX - x0) * dx + (hintY - y0) * dy) / lenSq;
+                    t = Math.max(0, Math.min(1, t));
+                }
+                const px = x0 + t * dx;
+                const py = y0 + t * dy;
+                const dist = Math.hypot(hintX - px, hintY - py);
+                if (!best || dist < best.dist) {
+                    const segLen = Math.hypot(dx, dy) || 1;
+                    let nx = -dy / segLen;
+                    let ny = dx / segLen;
+                    const dot = nx * (hintX - px) + ny * (hintY - py);
+                    if (dot < 0) {
+                        nx = -nx;
+                        ny = -ny;
+                    }
+                    best = { dist, px, py, nx, ny };
+                }
+            }
+            return best;
+        }
+
+        function otherStandsTooClose(x, y, excludeIndex) {
+            for (let i = 0; i < customStands.length; i++) {
+                if (i === excludeIndex) continue;
+                if (Math.hypot(customStands[i].x - x, customStands[i].y - y) < STAND_MIN_SPACING_M) return true;
+            }
+            return false;
+        }
+
+        function setStandStatus(msg) {
+            const el = document.getElementById('stand-status');
+            if (el) el.textContent = msg || '';
+        }
+
+        function updateStandModeBanner() {
+            const banner = document.getElementById('stand-mode-banner');
+            if (!banner || cameraMode !== 'grandstand') {
+                if (banner) banner.style.display = 'none';
+                return;
+            }
+            if (standSeatView) {
+                banner.textContent = 'Seat view: drag to look around · Esc returns to overhead';
+                banner.style.display = 'block';
+            } else if (placeStandActive) {
+                banner.textContent = 'Placing: click beside the track · drag to look · Esc to stop';
+                banner.style.display = 'block';
+            } else if (standDragging) {
+                banner.textContent = 'Move: drag the stand beside the track';
+                banner.style.display = 'block';
+            } else if (selectedCustomStand >= 0) {
+                banner.textContent = 'Move: drag the selected stand · Delete removes it';
+                banner.style.display = 'block';
+            } else {
+                banner.style.display = 'none';
+            }
+        }
+
+        function computeSnappedStand(hintX, hintY, excludeIndex, force) {
+            const frame = nearestCentrelineFrame(hintX, hintY);
+            if (!frame) return { ok: false, reason: 'Load a layout first' };
+            const { px, py, nx, ny } = frame;
+            const tx = -ny;
+            const ty = nx;
+            const base = standCenterOffsetM();
+            const slideMax = force ? STAND_SNAP_MAX_SLIDE_M : 70;
+            const slideStep = 4;
+            for (let extra = 0; extra <= STAND_SNAP_MAX_EXTRA_M; extra += 2) {
+                for (let slide = -slideMax; slide <= slideMax; slide += slideStep) {
+                    const sx = px + nx * (base + extra) + tx * slide;
+                    const sy = py + ny * (base + extra) + ty * slide;
+                    if (!force && otherStandsTooClose(sx, sy, excludeIndex)) continue;
+                    const elev = meshElevation(sx, sy);
+                    if (!Number.isFinite(elev)) continue;
+                    const candidate = candidateStandAt(sx, sy, px, py, nx, ny);
+                    const footprintClearanceM = standFootprintClearanceM(candidate);
+                    if (footprintClearanceM == null
+                        || footprintClearanceM < STAND_BOUNDARY_SETBACK_M - 0.25) continue;
+                    return {
+                        ok: true,
+                        x: sx,
+                        y: sy,
+                        eyeElev: elev + STAND_EYE_M,
+                        faceX: px,
+                        faceY: py,
+                        faceNx: nx,
+                        faceNy: ny,
+                        footprintClearanceM,
+                        edgeClearanceM: footprintClearanceM,
+                    };
+                }
+            }
+            if (!force && otherStandsTooClose(px + nx * base, py + ny * base, excludeIndex)) {
+                return { ok: false, reason: 'Too close to another stand' };
+            }
+            return { ok: false, reason: 'Stand would overlap the track' };
+        }
+
+        function snapCustomStandRecord(stand, index, force) {
+            const snap = computeSnappedStand(stand.x, stand.y, index, force);
+            if (!snap.ok) return { ...stand };
+            return {
+                ...stand,
+                x: snap.x,
+                y: snap.y,
+                eyeElev: snap.eyeElev,
+                faceX: snap.faceX,
+                faceY: snap.faceY,
+                faceNx: snap.faceNx,
+                faceNy: snap.faceNy,
+            };
+        }
+
+        function snapAllCustomStands(force) {
+            customStands = customStands.map((s, i) => snapCustomStandRecord(s, i, force));
+        }
+
+        function rebuildStandMarkers() {
+            if (!world) return;
+            if (!standMarkerGroup) {
+                standMarkerGroup = new THREE.Group();
+                world.add(standMarkerGroup);
+            }
+            while (standMarkerGroup.children.length) {
+                const child = standMarkerGroup.children.pop();
+                child.geometry?.dispose();
+                child.material?.dispose();
+            }
+            const show = cameraMode === 'grandstand' && !standSeatView;
+            standMarkerGroup.visible = show && customStands.length > 0;
+            if (!show) return;
+            customStands.forEach((s, i) => {
+                const ground = meshElevation(s.x, s.y);
+                const orient = standOrientation(s);
+                const ox = orient?.ox ?? 0;
+                const oy = orient?.oy ?? 1;
+                const group = new THREE.Group();
+                const body = new THREE.Mesh(
+                    new THREE.BoxGeometry(STAND_WIDTH_M, STAND_TIER_HEIGHT_M, STAND_DEPTH_M),
+                    new THREE.MeshStandardMaterial({
+                        color: i === selectedCustomStand ? 0xffcc33 : 0xcc4455,
+                        roughness: 0.62,
+                        metalness: 0.05,
+                        transparent: true,
+                        opacity: i === selectedCustomStand ? 0.94 : 0.82,
+                    }),
+                );
+                body.position.set(0, 0, 0);
+                group.add(body);
+                const cap = new THREE.Mesh(
+                    new THREE.CylinderGeometry(1.4, 1.4, 0.35, 12),
+                    new THREE.MeshBasicMaterial({
+                        color: i === selectedCustomStand ? 0xffee22 : 0x4ecdc4,
+                        transparent: true,
+                        opacity: 0.85,
+                        depthTest: true,
+                    }),
+                );
+                cap.position.set(0, STAND_TIER_HEIGHT_M / 2 + 0.2, 0);
+                group.add(cap);
+                group.position.set(s.x, ground - baseElevation + STAND_TIER_HEIGHT_M / 2, -s.y);
+                group.rotation.y = Math.atan2(ox, -oy);
+                group.userData.standIndex = i;
+                standMarkerGroup.add(group);
+            });
+        }
+
+        function pickStandMarker(clientX, clientY) {
+            if (!standMarkerGroup?.visible || !standMarkerGroup.children.length) return -1;
+            const rect = renderer.domElement.getBoundingClientRect();
+            let best = -1;
+            let bestD = 56;
+            const v = new THREE.Vector3();
+            for (const mesh of standMarkerGroup.children) {
+                mesh.getWorldPosition(v);
+                v.project(camera);
+                if (v.z > 1) continue;
+                const sx = rect.left + (v.x * 0.5 + 0.5) * rect.width;
+                const sy = rect.top + (-v.y * 0.5 + 0.5) * rect.height;
+                const d = Math.hypot(clientX - sx, clientY - sy);
+                if (d < bestD) {
+                    bestD = d;
+                    best = mesh.userData.standIndex;
+                }
+            }
+            return best;
+        }
+
+        function suggestDefaultStands() {
+            const corners = liveMetrics?.corners;
+            if (!corners?.length || !layoutPoints?.length) return [];
+            const sorted = [...corners].sort((a, b) => a.radius_m - b.radius_m);
+            const picks = [];
+            const used = [];
+            const tryCorner = (c, label, pickIndex) => {
+                const pt = sampleCentreline(c.position_m);
+                if (!pt) return null;
+                for (let probe = 0; probe <= 80; probe += 4) {
+                    const hintX = pt.x + (probe + STAND_BOUNDARY_SETBACK_M) * 0.15;
+                    const hintY = pt.y + (probe + STAND_BOUNDARY_SETBACK_M) * 0.15;
+                    const snap = computeSnappedStand(hintX, hintY, pickIndex, false);
+                    if (!snap.ok) continue;
+                    const clear = snap.edgeClearanceM;
+                    if (clear == null || clear < STAND_BOUNDARY_SETBACK_M - 0.5) continue;
+                    if (clear > 120.5) continue;
+                    return {
+                        id: `suggest-${picks.length}`,
+                        name: label,
+                        x: snap.x,
+                        y: snap.y,
+                        eyeElev: snap.eyeElev,
+                        faceX: snap.faceX,
+                        faceY: snap.faceY,
+                        faceNx: snap.faceNx,
+                        faceNy: snap.faceNy,
+                    };
+                }
+                const snap = computeSnappedStand(pt.x, pt.y, pickIndex, false);
+                if (!snap.ok) return null;
+                return {
+                    id: `suggest-${picks.length}`,
+                    name: label,
+                    x: snap.x,
+                    y: snap.y,
+                    eyeElev: snap.eyeElev,
+                    faceX: snap.faceX,
+                    faceY: snap.faceY,
+                    faceNx: snap.faceNx,
+                    faceNy: snap.faceNy,
+                };
+            };
+            for (const c of sorted) {
+                if (picks.length >= 2) break;
+                if (used.some(u => Math.abs(u - c.position_m) < 80)) continue;
+                const label = picks.length === 0 ? 'Tight corner 1' : 'Tight corner 2';
+                const stand = tryCorner(c, label, picks.length);
+                if (!stand) continue;
+                used.push(c.position_m);
+                picks.push(stand);
+            }
+            return picks;
+        }
+
+        function buildPresetStands() {
+            presetStands = [];
             const vp = currentSite?.bestViewpoint;
             if (!vp || !frame.sx) return;
             const x = (vp.lon - frame.lon0) * frame.sx;
             const y = (vp.lat - frame.lat0) * frame.sy;
             const elev = meshElevation(x, y);
-            driveStands.push({ id: 'best', name: 'Best viewpoint', x, y, eyeElev: elev + STAND_EYE_M });
+            presetStands.push({ id: 'best', name: 'Best viewpoint', x, y, eyeElev: elev + STAND_EYE_M, preset: true });
             const len = Math.hypot(x, y) || 1;
             const dx = -x / len;
             const dy = -y / len;
@@ -1999,18 +2854,116 @@
                 if (!best || e > best.e) best = { x: sx, y: sy, e };
             }
             if (best) {
-                driveStands.push({
-                    id: 'opposite', name: 'Opposite rim', x: best.x, y: best.y, eyeElev: best.e + STAND_EYE_M,
+                presetStands.push({
+                    id: 'opposite',
+                    name: 'Opposite rim',
+                    x: best.x,
+                    y: best.y,
+                    eyeElev: best.e + STAND_EYE_M,
+                    preset: true,
                 });
             }
-            const b0 = document.getElementById('btn-stand-0');
-            const b1 = document.getElementById('btn-stand-1');
-            if (b0 && driveStands[0]) b0.textContent = driveStands[0].name;
-            if (b1) {
-                b1.hidden = !driveStands[1];
-                if (driveStands[1]) b1.textContent = driveStands[1].name;
-            }
+        }
+
+        function rebuildDriveStands() {
+            driveStands = [...customStands, ...presetStands];
             if (grandstandIndex >= driveStands.length) grandstandIndex = 0;
+            if (selectedCustomStand >= customStands.length) selectedCustomStand = -1;
+            refreshStandUi();
+            rebuildStandMarkers();
+            updateStandModeBanner();
+        }
+
+        function refreshStandUi() {
+            updateStandSetbackLabel();
+            const list = document.getElementById('stand-list');
+            if (!list) return;
+            list.innerHTML = '';
+            driveStands.forEach((stand, i) => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.textContent = stand.name;
+                const selected = cameraMode === 'grandstand' && i === listSelectionIndex;
+                btn.className = selected ? 'active' : 'secondary';
+                btn.addEventListener('click', () => selectStandInList(i));
+                list.appendChild(btn);
+            });
+            const del = document.getElementById('btn-delete-stand');
+            const viewBtn = document.getElementById('btn-view-stand');
+            const place = document.getElementById('btn-place-stand');
+            const delIdx = selectedCustomStand >= 0 ? selectedCustomStand : -1;
+            if (del) del.disabled = delIdx < 0 || customStands.length === 0;
+            if (viewBtn) viewBtn.disabled = listSelectionIndex < 0;
+            if (place) {
+                place.disabled = customStands.length >= 4;
+                place.classList.toggle('active', placeStandActive);
+            }
+        }
+
+        function moveCustomStand(index, hintX, hintY, live) {
+            const snap = computeSnappedStand(hintX, hintY, index, false);
+            if (!snap.ok) {
+                if (!live) setStandStatus(snap.reason);
+                return false;
+            }
+            const s = customStands[index];
+            s.x = snap.x;
+            s.y = snap.y;
+            s.eyeElev = snap.eyeElev;
+            s.faceX = snap.faceX;
+            s.faceY = snap.faceY;
+            s.faceNx = snap.faceNx;
+            s.faceNy = snap.faceNy;
+            if (!live) setStandStatus('');
+            rebuildDriveStands();
+            return true;
+        }
+
+        function placeStandAt(hintX, hintY) {
+            if (!placeStandActive) return false;
+            if (customStands.length >= 4) {
+                setStandStatus('Maximum 4 stands');
+                return false;
+            }
+            const snap = computeSnappedStand(hintX, hintY, -1, false);
+            if (!snap.ok) {
+                setStandStatus(snap.reason);
+                return false;
+            }
+            const idx = customStands.length;
+            customStands.push({
+                id: `custom-${idx}`,
+                name: `Stand ${idx + 1}`,
+                x: snap.x,
+                y: snap.y,
+                eyeElev: snap.eyeElev,
+                faceX: snap.faceX,
+                faceY: snap.faceY,
+                faceNx: snap.faceNx,
+                faceNy: snap.faceNy,
+            });
+            selectedCustomStand = idx;
+            listSelectionIndex = idx;
+            setStandStatus('');
+            rebuildDriveStands();
+            return true;
+        }
+
+        function deleteSelectedStand() {
+            const idx = selectedCustomStand >= 0 ? selectedCustomStand : -1;
+            if (idx < 0 || idx >= customStands.length) return;
+            customStands.splice(idx, 1);
+            customStands.forEach((s, i) => {
+                s.id = `custom-${i}`;
+                if (/^Stand \d+$/.test(s.name)) s.name = `Stand ${i + 1}`;
+            });
+            selectedCustomStand = -1;
+            listSelectionIndex = -1;
+            rebuildDriveStands();
+        }
+
+        function nearestTrackDistanceM(x, y) {
+            return trackEdgeClearanceM(x, y);
         }
 
         function updateCameraModeUi() {
@@ -2021,20 +2974,33 @@
                 btn.classList.toggle('active', on);
                 btn.classList.toggle('secondary', !on);
             }
-            const standBox = document.getElementById('stand-switch');
-            if (standBox) standBox.style.display = cameraMode === 'grandstand' ? 'flex' : 'none';
-            [0, 1].forEach(i => {
-                const btn = document.getElementById('btn-stand-' + i);
-                if (!btn) return;
-                const on = cameraMode === 'grandstand' && i === grandstandIndex;
-                btn.classList.toggle('active', on);
-                btn.classList.toggle('secondary', !on);
-            });
+            const standBox = document.getElementById('stand-panel');
+            if (standBox) standBox.style.display = cameraMode === 'grandstand' ? 'block' : 'none';
+            if (cameraMode !== 'grandstand' && placeStandActive) {
+                setPlaceStandActive(false);
+            }
+            refreshStandUi();
+            updateStandSetbackLabel();
+            const placeHint = document.getElementById('stand-place-hint');
+            if (placeHint) {
+                placeHint.textContent = placeStandActive
+                    ? 'Placing: click beside the track · drag to look · Esc to stop'
+                    : 'Select a stand marker to move it · Place stand to add';
+                placeHint.style.display = cameraMode === 'grandstand' ? 'block' : 'none';
+            }
+            updateStandModeBanner();
+            rebuildStandMarkers();
             const help = document.getElementById('help');
             if (!help) return;
-            help.textContent = cameraMode === 'orbit'
-                ? 'Drag to orbit · Onboard, grandstand, or helicopter to judge the lap · Edit points, then drag a handle'
-                : 'Play follows the racing line at the profiled speed · Scrub to a distance · Orbit returns to the plan view';
+            if (cameraMode === 'orbit') {
+                help.textContent =
+                    'Drag to orbit · Onboard, grandstand, or helicopter to judge the lap · Edit points, then drag a handle';
+            } else if (cameraMode === 'grandstand' && placeStandActive) {
+                help.textContent = 'Click to place beside the track · drag to look around · Esc to exit placement';
+            } else {
+                help.textContent =
+                    'Play follows the racing line at the profiled speed · Scrub to a distance · Orbit returns to the plan view';
+            }
         }
 
         function syncDriveUi() {
@@ -2131,7 +3097,7 @@
             driveDistance = d;
             if (snapLook) lookReady = false;
             updateCarMarker();
-            if (cameraMode !== 'orbit') applyDriveCamera(null);
+            if (cameraMode !== 'orbit' && cameraMode !== 'grandstand') applyDriveCamera(null);
             syncDriveUi();
         }
 
@@ -2143,7 +3109,7 @@
                 return;
             }
             updateCarMarker();
-            if (cameraMode !== 'orbit') {
+            if (cameraMode !== 'orbit' && cameraMode !== 'grandstand') {
                 lookReady = false;
                 applyDriveCamera(null);
             }
@@ -2203,8 +3169,8 @@
             }
             const wasOrbit = cameraMode === 'orbit';
             cameraMode = mode;
-            if (controls) controls.enabled = false;
-            camera.fov = mode === 'onboard' ? ONBOARD_FOV : 55;
+            if (controls) controls.enabled = mode === 'grandstand';
+            camera.fov = mode === 'onboard' ? ONBOARD_FOV : mode === 'grandstand' ? grandstandFov : 55;
             camera.near = mode === 'onboard' ? 0.2 : 0.4;
             camera.updateProjectionMatrix();
             if (scene?.fog) scene.fog.density = mode === 'onboard' ? 0.00012 : 0.00008;
@@ -2219,18 +3185,27 @@
             setViewpointVisible(false);
             syncLabelVisibility();
             updateCarMarker();
-            applyDriveCamera(null);
+            if (mode === 'grandstand') {
+                enterGrandstandLayout();
+            } else {
+                standSeatView = false;
+                seatStandIndex = -1;
+                if (controls) controls.enabled = false;
+                applyDriveCamera(null);
+            }
             updateCameraModeUi();
             syncDriveUi();
             if (renderer) renderer.shadowMap.needsUpdate = true;
         }
 
-        function showStand(index) {
+        function selectStandInList(index) {
             if (!driveStands[index]) return;
-            grandstandIndex = index;
+            listSelectionIndex = index;
+            selectedCustomStand = index < customStands.length ? index : -1;
             if (cameraMode !== 'grandstand') setCameraMode('grandstand');
             else {
-                applyDriveCamera(null);
+                rebuildStandMarkers();
+                updateStandModeBanner();
                 updateCameraModeUi();
             }
         }
@@ -2339,7 +3314,7 @@
             renderer.domElement.addEventListener('pointerdown', onPointerDown, true);
             window.addEventListener('pointermove', onPointerMove);
             window.addEventListener('pointerup', onPointerUp);
-            window.addEventListener('pointercancel', onPointerUp);
+            window.addEventListener('pointercancel', onPointerCancel);
             renderer.domElement.addEventListener('dblclick', onDoubleClick);
 
             world = new THREE.Group();
@@ -2410,6 +3385,14 @@
                     selectedIndex = -1;
                     liveViewshedPct = null;
                     applyWorkingLayout();
+                    if (Object.prototype.hasOwnProperty.call(layout, 'stands')) {
+                        customStands = standsFromLayout(layout);
+                        snapAllCustomStands(true);
+                    } else {
+                        customStands = suggestDefaultStands();
+                    }
+                    selectedCustomStand = -1;
+                    rebuildDriveStands();
                     const dir = document.getElementById('layout-direction');
                     dir.textContent = layout.direction || '';
                     dir.style.display = layout.direction ? 'block' : 'none';
@@ -2458,9 +3441,126 @@
                         mode: cameraMode,
                         distanceM: driveDistance,
                         stands: driveStands.map(s => ({
+                            name: s.name, x: s.x, y: s.y, eyeElev: s.eyeElev, preset: !!s.preset,
+                        })),
+                        customStands: customStands.map(s => ({
                             name: s.name, x: s.x, y: s.y, eyeElev: s.eyeElev,
                         })),
                     };
+                },
+                placeStandAt,
+                moveCustomStandByHint(index, hintX, hintY) {
+                    return moveCustomStand(index, hintX, hintY, false);
+                },
+                nearestTrackDistanceM,
+                trackEdgeClearanceM,
+                deleteAllCustomStands() {
+                    customStands = [];
+                    grandstandIndex = 0;
+                    rebuildDriveStands();
+                    if (cameraMode === 'grandstand') enterGrandstandLayout();
+                },
+                setPlaceStandActive,
+                isPlaceStandActive() {
+                    return placeStandActive;
+                },
+                isStandSeatView() {
+                    return standSeatView;
+                },
+                listSelectionIndex() {
+                    return listSelectionIndex;
+                },
+                enterStandSeatView,
+                exitStandSeatView,
+                controlsEnabled() {
+                    return !!controls?.enabled;
+                },
+                pickStandMarkerAt(clientX, clientY) {
+                    return pickStandMarker(clientX, clientY);
+                },
+                standMarkerScreen(index) {
+                    if (!standMarkerGroup?.visible || !camera) return null;
+                    const mesh = standMarkerGroup.children.find(
+                        (c) => c.userData?.standIndex === index,
+                    );
+                    if (!mesh) return null;
+                    const rect = renderer.domElement.getBoundingClientRect();
+                    const v = new THREE.Vector3();
+                    mesh.getWorldPosition(v);
+                    v.project(camera);
+                    if (v.z > 1) return null;
+                    return {
+                        x: rect.left + (v.x * 0.5 + 0.5) * rect.width,
+                        y: rect.top + (-v.y * 0.5 + 0.5) * rect.height,
+                    };
+                },
+                cameraPosition() {
+                    if (!camera) return null;
+                    return { x: camera.position.x, y: camera.position.y, z: camera.position.z };
+                },
+                standBoundarySetbackM: STAND_BOUNDARY_SETBACK_M,
+                standRunoffMarginM: STAND_BOUNDARY_SETBACK_M,
+                standBoundarySetbackLabel,
+                getKeepOutPolygons,
+                footprintMinClearanceToBoundariesM,
+                placeStandNearDistanceM(distM) {
+                    const p = sampleCentreline(distM);
+                    if (!p) return { ok: false, reason: 'no point' };
+                    const ok = placeStandAt(p.x + 22, p.y + 22);
+                    const last = customStands[customStands.length - 1];
+                    return {
+                        ok,
+                        edgeClearanceM: last ? trackEdgeClearanceM(last.x, last.y) : null,
+                    };
+                },
+                standClearances() {
+                    return customStands.map((s) => ({
+                        name: s.name,
+                        edgeClearanceM: trackEdgeClearanceM(s.x, s.y),
+                        footprintClearanceM: standFootprintClearanceM(s),
+                        overlapsRoad: standFootprintOverlapsRoad(s),
+                    }));
+                },
+                standFootprintClearances() {
+                    return customStands.map((s) => ({
+                        name: s.name,
+                        footprintClearanceM: standFootprintClearanceM(s),
+                        overlapsRoad: standFootprintOverlapsRoad(s),
+                    }));
+                },
+                layoutMinFootprintClearanceM() {
+                    const rows = customStands.map((s) => standFootprintClearanceM(s))
+                        .filter((d) => d != null);
+                    return rows.length ? Math.min(...rows) : null;
+                },
+                clientPointBesideCentrelineM(distM, offsetM = 26) {
+                    const pt = sampleCentreline(distM);
+                    if (!pt || !camera || !renderer) return null;
+                    const frame = nearestCentrelineFrame(pt.x, pt.y);
+                    if (!frame) return null;
+                    const hx = frame.px + frame.nx * offsetM;
+                    const hy = frame.py + frame.ny * offsetM;
+                    const ground = meshElevation(hx, hy);
+                    const v = new THREE.Vector3(
+                        hx,
+                        (ground - baseElevation + 1.2) * (world?.scale.y || 1),
+                        -hy,
+                    );
+                    const rect = renderer.domElement.getBoundingClientRect();
+                    v.project(camera);
+                    if (v.z > 1) return null;
+                    return {
+                        x: rect.left + (v.x * 0.5 + 0.5) * rect.width,
+                        y: rect.top + (-v.y * 0.5 + 0.5) * rect.height,
+                        layoutX: hx,
+                        layoutY: hy,
+                    };
+                },
+                cornerList() {
+                    return (liveMetrics?.corners || []).map((c) => ({
+                        positionM: c.position_m,
+                        radiusM: c.radius_m,
+                    }));
                 },
             };
 
@@ -2532,6 +3632,21 @@
                     }
                     return;
                 }
+                if (e.key === 'Escape' && cameraMode === 'grandstand' && standSeatView) {
+                    e.preventDefault();
+                    exitStandSeatView();
+                    return;
+                }
+                if (e.key === 'Escape' && placeStandActive) {
+                    e.preventDefault();
+                    setPlaceStandActive(false);
+                    return;
+                }
+                if (cameraMode === 'grandstand' && (e.key === 'Delete' || e.key === 'Backspace')) {
+                    e.preventDefault();
+                    deleteSelectedStand();
+                    return;
+                }
                 if (!editMode || cameraMode !== 'orbit') return;
                 if (e.key === 'Delete' || e.key === 'Backspace') {
                     e.preventDefault();
@@ -2576,15 +3691,28 @@
             document.getElementById('btn-cam-onboard').addEventListener('click', () => setCameraMode('onboard'));
             document.getElementById('btn-cam-helicopter').addEventListener('click', () => setCameraMode('helicopter'));
             document.getElementById('btn-cam-grandstand').addEventListener('click', () => {
-                if (cameraMode === 'grandstand' && driveStands.length > 1) {
-                    showStand((grandstandIndex + 1) % driveStands.length);
-                } else {
-                    grandstandIndex = 0;
-                    setCameraMode('grandstand');
+                if (cameraMode === 'grandstand' && standSeatView) exitStandSeatView();
+                setCameraMode('grandstand');
+            });
+            document.getElementById('btn-view-stand').addEventListener('click', () => {
+                if (listSelectionIndex < 0) return;
+                if (cameraMode !== 'grandstand') setCameraMode('grandstand');
+                enterStandSeatView(listSelectionIndex);
+            });
+            document.getElementById('btn-place-stand').addEventListener('click', () => {
+                if (cameraMode !== 'grandstand') setCameraMode('grandstand');
+                if (customStands.length >= 4 && !placeStandActive) return;
+                setPlaceStandActive(!placeStandActive);
+            });
+            document.getElementById('btn-delete-stand').addEventListener('click', () => deleteSelectedStand());
+            document.getElementById('stand-fov').addEventListener('input', (e) => {
+                grandstandFov = parseFloat(e.target.value) || 55;
+                document.getElementById('stand-fov-value').textContent = `${grandstandFov}°`;
+                if (cameraMode === 'grandstand' && camera) {
+                    camera.fov = grandstandFov;
+                    camera.updateProjectionMatrix();
                 }
             });
-            document.getElementById('btn-stand-0').addEventListener('click', () => showStand(0));
-            document.getElementById('btn-stand-1').addEventListener('click', () => showStand(1));
             document.getElementById('btn-drive-play').addEventListener('click', () => {
                 if (!liveMetrics?.lapLengthM) return;
                 drivePlaying = !drivePlaying;
@@ -2625,8 +3753,14 @@
                 }
             }
             updateCarMarker();
-            if (cameraMode === 'orbit') controls.update();
-            else applyDriveCamera(drivePlaying ? dt : null);
+            if (cameraMode === 'orbit' || cameraMode === 'grandstand') {
+                if (cameraMode === 'grandstand' && standSeatView && controls && !standDragging) {
+                    controls.target.copy(standSeatLookTarget());
+                }
+                controls.update();
+            } else {
+                applyDriveCamera(drivePlaying ? dt : null);
+            }
             if (drivePlaying) syncDriveUi();
             updateHandleColors();
             sky.position.copy(camera.position);
